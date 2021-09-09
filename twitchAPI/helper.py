@@ -97,12 +97,11 @@ def make_fields_datetime(data: Union[dict, list], fields: List[str]):
     """
 
     def make_str_field_datetime(data, fields: list):
-        if isinstance(data, str):
-            if data in fields:
-                if data == "":
-                    return None
-                else:
-                    return du_parser.isoparse(data)
+        if isinstance(data, str) and data in fields:
+            if data == "":
+                return None
+            else:
+                return du_parser.isoparse(data)
         return data
 
     def make_dict_field_datetime(data: dict, fields: list) -> dict:
@@ -162,10 +161,7 @@ def fields_to_enum(data: Union[dict, list],
             # TODO fix for non string values
             if isinstance(value, str):
                 if key in fields:
-                    if value not in _enum_vals:
-                        fd[key] = default
-                    else:
-                        fd[key] = _enum(value)
+                    fd[key] = default if value not in _enum_vals else _enum(value)
             elif isinstance(value, dict):
                 fd[key] = make_dict_field_enum(value, fields, _enum, default)
             elif isinstance(value, list):
