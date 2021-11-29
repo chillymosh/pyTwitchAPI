@@ -191,7 +191,8 @@ class TwitchWebHook:
                              web.get('/subscriptions/events', self.__handle_challenge),
                              web.post('/subscriptions/events', self.__handle_subscription_events),
                              web.get('/', self.__handle_default)])
-        return web.AppRunner(hook_app)
+        hook_runner = web.AppRunner(hook_app)
+        return hook_runner
 
     def __run_hook(self, runner: 'web.AppRunner'):
         self.__hook_runner = runner
@@ -242,19 +243,17 @@ class TwitchWebHook:
 
         :rtype: None
         """
-        if self.__hook_runner is None:
-            return
-
-        if self.unsubscribe_on_stop:
-            all_keys = list(self.__active_webhooks.keys())
-            for uuid in all_keys:
-                self.unsubscribe(uuid)
-        if self.auto_renew_subscription:
-            self.__task_refresh.cancel()
-        self.__hook_loop.call_soon_threadsafe(self.__hook_loop.stop)
-        self.__hook_runner = None
-        self.__hook_thread.join()
-        self.__running = False
+        if self.__hook_runner is not None:
+            if self.unsubscribe_on_stop:
+                all_keys = list(self.__active_webhooks.keys())
+                for uuid in all_keys:
+                    self.unsubscribe(uuid)
+            if self.auto_renew_subscription:
+                self.__task_refresh.cancel()
+            self.__hook_loop.call_soon_threadsafe(self.__hook_loop.stop)
+            self.__hook_runner = None
+            self.__hook_thread.join()
+            self.__running = False
 
     # ==================================================================================================================
     # HELPER
@@ -372,13 +371,13 @@ class TwitchWebHook:
             if uuid is not None and d.get('callback').startswith(self.callback_url):
                 self.__unsubscribe_all_helper[uuid] = False
                 sub_responses.append(self._generic_unsubscribe(d.get('callback'), d.get('topic'), callback_full=False))
-        if not self.wait_for_subscription_confirm:
+        if self.wait_for_subscription_confirm:
+            timeout = time.time() + self.wait_for_subscription_confirm_timeout
+            while timeout > time.time() and not all(self.__unsubscribe_all_helper.values()):
+                time.sleep(0.1)
+            return all(self.__unsubscribe_all_helper.values()) and all(sub_responses)
+        else:
             return all(sub_responses)
-
-        timeout = time.time() + self.wait_for_subscription_confirm_timeout
-        while timeout > time.time() and not all(self.__unsubscribe_all_helper.values()):
-            time.sleep(0.1)
-        return all(self.__unsubscribe_all_helper.values()) and all(sub_responses)
 
     def renew_subscription(self,
                            uuid: UUID) -> bool:
