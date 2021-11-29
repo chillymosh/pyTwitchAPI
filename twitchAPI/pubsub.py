@@ -178,14 +178,13 @@ class PubSub:
             confirmed = self.__nonce_waiting_confirm[nonce]['received']
         if not confirmed:
             raise PubSubListenTimeoutException()
-        else:
-            error = self.__nonce_waiting_confirm[nonce]['error']
-            if error is not PubSubResponseError.NONE:
-                if error is PubSubResponseError.BAD_AUTH:
-                    raise TwitchAuthorizationException()
-                if error is PubSubResponseError.SERVER:
-                    raise TwitchBackendException()
-                raise TwitchAPIException(error)
+        error = self.__nonce_waiting_confirm[nonce]['error']
+        if error is not PubSubResponseError.NONE:
+            if error is PubSubResponseError.BAD_AUTH:
+                raise TwitchAuthorizationException()
+            if error is PubSubResponseError.SERVER:
+                raise TwitchBackendException()
+            raise TwitchAPIException(error)
 
     async def __send_message(self, msg_data):
         await self.__connection.send(json.dumps(msg_data))
@@ -316,9 +315,9 @@ class PubSub:
                 topic_data['subs'].pop(uuid)
                 if len(topic_data['subs'].keys()) == 0:
                     clear_topics.append(topic)
-        if self.__startup_complete and len(clear_topics) > 0:
+        if self.__startup_complete and clear_topics:
             asyncio.get_event_loop().run_until_complete(self.__send_listen(str(uuid), clear_topics, subscribe=False))
-        if len(clear_topics) > 0:
+        if clear_topics:
             for topic in clear_topics:
                 self.__topics.pop(topic)
 

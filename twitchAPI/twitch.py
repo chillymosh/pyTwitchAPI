@@ -216,17 +216,11 @@ class Twitch:
         if required_type == AuthType.USER:
             if not self.__has_user_auth:
                 return False
-            for s in required_scope:
-                if s not in self.__user_auth_scope:
-                    return False
-            return True
+            return not any(s not in self.__user_auth_scope for s in required_scope)
         if required_type == AuthType.APP:
             if not self.__has_app_auth:
                 return False
-            for s in required_scope:
-                if s not in self.__app_auth_scope:
-                    return False
-            return True
+            return all(s in self.__app_auth_scope for s in required_scope)
         # default to false
         return False
 
@@ -273,7 +267,7 @@ class Twitch:
                     return retry_func(url, auth_type, required_scope, data=data, retries=retries - 1)
                 else:
                     return retry_func(url, auth_type, required_scope, retries=retries - 1)
-        elif self.auto_refresh_auth and retries <= 0:
+        elif self.auto_refresh_auth:
             if response.status_code == 503:
                 raise TwitchBackendException('The Twitch API returns a server error')
             if response.status_code == 401:
@@ -450,24 +444,26 @@ class Twitch:
         if refresh_token is None and self.auto_refresh_auth:
             raise ValueError('refresh_token has to be provided when auto_refresh_user_auth is True')
         if validate:
-            from .oauth import validate_token
-            val_result = validate_token(token)
-            if val_result.get('status', 200) == 401:
-                raise InvalidTokenException(val_result.get('message', ''))
-            if 'login' not in val_result or 'user_id' not in val_result:
-                # this is a app token or not valid
-                raise InvalidTokenException('not a user oauth token')
-            if val_result.get('client_id') != self.app_id:
-                raise InvalidTokenException('client id does not match')
-            scopes = val_result.get('scopes', [])
-            for s in scope:
-                if s not in scopes:
-                    raise MissingScopeException(f'given token is missing scope {s.value}')
-
+            self.token_validation(token, scope)
         self.__user_auth_token = token
         self.__user_auth_refresh_token = refresh_token
         self.__user_auth_scope = scope
         self.__has_user_auth = True
+
+    def token_validation(self, token, scope):
+        from .oauth import validate_token
+        val_result = validate_token(token)
+        if val_result.get('status', 200) == 401:
+            raise InvalidTokenException(val_result.get('message', ''))
+        if 'login' not in val_result or 'user_id' not in val_result:
+            # this is a app token or not valid
+            raise InvalidTokenException('not a user oauth token')
+        if val_result.get('client_id') != self.app_id:
+            raise InvalidTokenException('client id does not match')
+        scopes = val_result.get('scopes', [])
+        for s in scope:
+            if s not in scopes:
+                raise MissingScopeException(f'given token is missing scope {s.value}')
 
     def get_app_token(self) -> Union[str, None]:
         """Returns the app token that the api uses or None when not authenticated.
@@ -750,7 +746,7 @@ class Twitch:
         """
         if clip_id is not None and len(clip_id) > 100:
             raise ValueError('A maximum of 100 clips can be queried in one call')
-        if not (sum([clip_id is not None, broadcaster_id is not None, game_id is not None]) == 1):
+        if (sum([clip_id is not None, broadcaster_id is not None, game_id is not None]) != 1):
             raise ValueError('You need to specify exactly one of clip_id, broadcaster_id or game_id')
         if first < 1 or first > 100:
             raise ValueError('first must be in range 1 to 100')
@@ -788,7 +784,7 @@ class Twitch:
         :raises ValueError: if length of code is not in range 1 to 20
         :rtype: dict
         """
-        if len(code) > 20 or len(code) < 1:
+        if len(code) > 20 or not code:
             raise ValueError('only between 1 and 20 codes are allowed')
         param = {
             'code': code,
@@ -818,7 +814,7 @@ class Twitch:
         :raises ValueError: if length of code is not in range 1 to 20
         :rtype: dict
         """
-        if len(code) > 20 or len(code) < 1:
+        if len(code) > 20 or not code:
             raise ValueError('only between 1 and 20 codes are allowed')
         param = {
             'code': code,
@@ -1919,9 +1915,8 @@ class Twitch:
         if first < 1 or first > 1000:
             raise ValueError('first must be between 1 and 1000')
         can_use, auth_type, token, scope = self.__get_used_either_auth([])
-        if auth_type == AuthType.USER:
-            if user_id is not None:
-                raise ValueError('cant use user_id when using User Authentication')
+        if auth_type == AuthType.USER and user_id is not None:
+            raise ValueError('cant use user_id when using User Authentication')
         url = build_url(TWITCH_API_BASE_URL + 'entitlements/drops',
                         {
                             'id': id,
@@ -1931,8 +1926,7 @@ class Twitch:
                             'first': first
                         }, remove_none=True)
         response = self.__api_get_request(url, AuthType.EITHER, [])
-        data = make_fields_datetime(response.json(), ['timestamp'])
-        return data
+        return make_fields_datetime(response.json(), ['timestamp'])
 
     def create_custom_reward(self,
                              broadcaster_id: str,
@@ -2337,7 +2331,7 @@ class Twitch:
         :raises ValueError: if video_ids contains more than 5 entries or is a empty list
         :rtype: dict or False
         """
-        if video_ids is None or len(video_ids) == 0 or len(video_ids) > 5:
+        if video_ids is None or not video_ids or len(video_ids) > 5:
             raise ValueError('video_ids must contain between 1 and 5 entries')
         url = build_url(TWITCH_API_BASE_URL + 'videos', {'id': video_ids}, split_lists=True)
         result = self.__api_delete_request(url, AuthType.USER, [AuthScope.CHANNEL_MANAGE_VIDEOS])
@@ -2543,12 +2537,14 @@ class Twitch:
         """
         if duration < 15 or duration > 1800:
             raise ValueError('duration must be between 15 and 1800')
-        if bits_per_vote is not None:
-            if bits_per_vote < 0 or bits_per_vote > 10000:
-                raise ValueError('bits_per_vote must be in range 0 to 10000')
-        if channel_points_per_vote is not None:
-            if channel_points_per_vote < 0 or channel_points_per_vote > 1_000_000:
-                raise ValueError('channel_points_per_vote must be in range 0 to 1000000')
+        if bits_per_vote is not None and (
+            bits_per_vote < 0 or bits_per_vote > 10000
+        ):
+            raise ValueError('bits_per_vote must be in range 0 to 10000')
+        if channel_points_per_vote is not None and (
+            channel_points_per_vote < 0 or channel_points_per_vote > 1_000_000
+        ):
+            raise ValueError('channel_points_per_vote must be in range 0 to 1000000')
         if len(choices) < 0 or len(choices) > 5:
             raise ValueError('require between 2 and 5 choices')
         body = {k: v for k, v in {
@@ -2628,9 +2624,8 @@ class Twitch:
         """
         if first is not None and (first < 1 or first > 20):
             raise ValueError('first must be in range 1 to 20')
-        if prediction_ids is not None:
-            if len(prediction_ids) > 100:
-                raise ValueError('maximum of 100 prediction ids allowed')
+        if prediction_ids is not None and len(prediction_ids) > 100:
+            raise ValueError('maximum of 100 prediction ids allowed')
 
         url = build_url(TWITCH_API_BASE_URL + 'predictions',
                         {
@@ -2708,9 +2703,8 @@ class Twitch:
         """
         if status not in (PredictionStatus.RESOLVED, PredictionStatus.CANCELED, PredictionStatus.LOCKED):
             raise ValueError('status has to be one of RESOLVED, CANCELED or LOCKED')
-        if status == PredictionStatus.RESOLVED:
-            if winning_outcome_id is None:
-                raise ValueError('need to specify winning_outcome_id for status RESOLVED')
+        if status == PredictionStatus.RESOLVED and winning_outcome_id is None:
+            raise ValueError('need to specify winning_outcome_id for status RESOLVED')
         body = {
             'broadcaster_id': broadcaster_id,
             'id': prediction_id,
