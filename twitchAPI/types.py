@@ -50,7 +50,8 @@ class AuthScope(Enum):
     CHANNEL_READ_PREDICTIONS = 'channel:read:predictions'
     CHANNEL_MANAGE_PREDICTIONS = 'channel:manage:predictions'
     MODERATOR_MANAGE_AUTOMOD = 'moderator:manage:automod'
-    CHANNEL_MANAGE_SCHEDULE = 'channel:manage:channel'
+    CHANNEL_MANAGE_SCHEDULE = 'channel:manage:schedule'
+    CHANNEL_MANAGE_CHAT_SETTINGS = 'channel:manage:chat_settings'
 
 
 class ModerationEventType(Enum):
