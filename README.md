@@ -1,6 +1,6 @@
 # Python Twitch API
 
-[![PyPI verion](https://img.shields.io/pypi/v/twitchAPI.svg)](https://pypi.org/project/twitchAPI/) [![Python version](https://img.shields.io/pypi/pyversions/twitchAPI)](https://pypi.org/project/twitchAPI/) [![Twitch API version](https://img.shields.io/badge/twitch%20API%20version-Helix-brightgreen)](https://dev.twitch.tv/docs/api) [![Documentation Status](https://readthedocs.org/projects/pytwitchapi/badge/?version=latest)](https://pytwitchapi.readthedocs.io/en/latest/?badge=latest)
+[![PyPI verion](https://img.shields.io/pypi/v/twitchAPI.svg)](https://pypi.org/project/twitchAPI/) [![Downloads](https://pepy.tech/badge/twitchapi)](https://pepy.tech/project/twitchapi) [![Python version](https://img.shields.io/pypi/pyversions/twitchAPI)](https://pypi.org/project/twitchAPI/) [![Twitch API version](https://img.shields.io/badge/twitch%20API%20version-Helix-brightgreen)](https://dev.twitch.tv/docs/api) [![Documentation Status](https://readthedocs.org/projects/pytwitchapi/badge/?version=latest)](https://pytwitchapi.readthedocs.io/en/latest/?badge=latest)
 
 
 This is a full implementation of the Twitch API, its Webhook and PubSub in python 3.7.  
@@ -142,7 +142,7 @@ pubsub.stop()
 
 
 You need to have a public IP with a port open. That port will be 80 by default.
-You need app authentication and your Endpoint URL must point to a
+You need app authentication.
 
 **Please note that Your Endpoint URL has to be HTTPS, has to run on Port 443 and requires a valid, non self signed certificate
 This most likely means, that you need a reverse proxy like nginx. You can also hand in a valid ssl context to be used in the constructor.**

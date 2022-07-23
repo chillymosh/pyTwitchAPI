@@ -283,8 +283,14 @@ class Twitch:
         if response.status_code == 500:
             raise TwitchBackendException('Internal Server Error')
         if response.status_code == 400:
-            raise TwitchAPIException('Bad Request')
-        if str(response.headers['Ratelimit-Remaining']) == '0' or response.status_code == 429:
+            msg = None
+            try:
+                msg = response.json().get('message')
+            except:
+                pass
+            raise TwitchAPIException('Bad Request' + '' if msg is None else f'- {msg}')
+
+        if response.status_code == 429 or str(response.headers.get('Ratelimit-Remaining', '')) == '0':
             self.__logger.warning('reached rate limit, waiting for reset')
             import time
             reset = int(response.headers['Ratelimit-Reset'])
@@ -607,6 +613,26 @@ class Twitch:
         data = response.json()
         return make_fields_datetime(data, ['ended_at', 'started_at'])
 
+    def get_creator_goals(self, broadcaster_id: str) -> dict:
+        """Gets Creator Goal Details for the specified channel.
+
+        Requires User authentication with scope :const:`twitchAPI.types.AuthScope.CHANNEL_READ_GOALS`\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-creator-goals
+
+        :param str broadcaster_id: The ID of the broadcaster that created the goals.
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if authentication is not set or invalid
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid
+                        and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
+        :rtype: dict
+        """
+        url = build_url(TWITCH_API_BASE_URL + 'goals', {'broadcaster_id': broadcaster_id})
+        result = self.__api_get_request(url, AuthType.USER, [AuthScope.CHANNEL_READ_GOALS])
+        data = result.json()
+        return make_fields_datetime(data, ['created_at'])
+    
     def get_bits_leaderboard(self,
                              count: Optional[int] = 10,
                              period: Optional[TimePeriod] = TimePeriod.ALL,
@@ -1087,7 +1113,185 @@ class Twitch:
         }
         url = build_url(TWITCH_API_BASE_URL + 'moderation/banned', param, remove_none=True)
         result = self.__api_get_request(url, AuthType.USER, [AuthScope.MODERATION_READ])
-        return make_fields_datetime(result.json(), ['expires_at'])
+        return make_fields_datetime(result.json(), ['expires_at', 'created_at'])
+
+    def ban_user(self,
+                 broadcaster_id: str,
+                 moderator_id: str,
+                 user_id: str,
+                 reason: str,
+                 duration: Optional[int] = None) -> dict:
+        """Bans a user from participating in a broadcaster’s chat room, or puts them in a timeout.
+
+        Requires User authentication with scope :const:`twitchAPI.types.AuthScope.MODERATOR_MANAGE_BANNED_USERS`\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#ban-user
+
+        :param str broadcaster_id: The ID of the broadcaster whose chat room the user is being banned from.
+        :param str moderator_id: The ID of a user that has permission to moderate the broadcaster’s chat room. This ID must match the user ID
+                    associated with the user OAuth token.
+        :param str user_id: The ID of the user to ban or put in a timeout.
+        :param str reason: The reason the user is being banned or put in a timeout.
+                    The text is user defined and limited to a maximum of 500 characters.
+        :param int duration: To ban a user indefinitely, don't set this. Put a user in timeout for the number of seconds specified.
+                    Maximum 1_209_600 (2 weeks) |default| :code:`None`
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid
+                        and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ValueError: if duration is set and not between 1 and 1_209_600
+        :raises ValueError: if reason is not between 1 and 500 characters in length
+        :rtype: dict
+        """
+        if duration is not None and (duration < 1 or duration > 1_209_600):
+            raise ValueError('duration must be either omitted or between 1 and 1209600')
+        if len(reason) < 1 or len(reason) > 500:
+            raise ValueError('reason must be between 1 and 500 characters in length')
+        param = {
+            'broadcaster_id': broadcaster_id,
+            'moderator_id': moderator_id
+        }
+        url = build_url(TWITCH_API_BASE_URL + 'moderation/bans', param, remove_none=False)
+        body = {
+            'data': remove_none_values({
+                'duration': duration,
+                'reason': reason,
+                'user_id': user_id
+            })
+        }
+        result = self.__api_post_request(url, AuthType.USER, [AuthScope.MODERATOR_MANAGE_BANNED_USERS], data=body)
+        return make_fields_datetime(result.json(), ['created_at', 'end_time'])
+
+    def unban_user(self,
+                   broadcaster_id: str,
+                   moderator_id: str,
+                   user_id: str) -> bool:
+        """Removes the ban or timeout that was placed on the specified user
+
+        Requires User authentication with scope :const:`twitchAPI.types.AuthScope.MODERATOR_MANAGE_BANNED_USERS`\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#unban-user
+
+        :param str broadcaster_id: The ID of the broadcaster whose chat room the user is banned from chatting in.
+        :param str moderator_id: The ID of a user that has permission to moderate the broadcaster’s chat room.
+                    This ID must match the user ID associated with the user OAuth token.
+        :param str user_id: The ID of the user to remove the ban or timeout from.
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid
+                        and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :rtype: bool
+        """
+        param = {
+            'broadcaster_id': broadcaster_id,
+            'moderator_id': moderator_id,
+            'user_id': user_id
+        }
+        url = build_url(TWITCH_API_BASE_URL + 'moderation/bans', param)
+        result = self.__api_delete_request(url, AuthType.USER, [AuthScope.MODERATOR_MANAGE_BANNED_USERS])
+        return result.status_code == 204
+
+    def get_blocked_terms(self,
+                          broadcaster_id: str,
+                          moderator_id: str,
+                          after: Optional[str] = None,
+                          first: Optional[int] = None) -> dict:
+        """Gets the broadcaster’s list of non-private, blocked words or phrases.
+        These are the terms that the broadcaster or moderator added manually, or that were denied by AutoMod.
+
+        Requires User authentication with scope :const:`twitchAPI.types.AuthScope.MODERATOR_READ_BLOCKED_TERMS`\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-blocked-terms
+
+        :param str broadcaster_id: The ID of the broadcaster whose blocked terms you’re getting.
+        :param str moderator_id: The ID of a user that has permission to moderate the broadcaster’s chat room.
+                    This ID must match the user ID associated with the user OAuth token.
+        :param str after: The cursor used to get the next page of results. |default| :code:`None`
+        :param int first: The maximum number of blocked terms to return per page in the response. Maximum 100 |default| :code:`None`
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid
+                        and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ValueError: if first is set and not between 1 and 100
+        :rtype: dict
+        """
+        if first is not None and (first < 1 or first > 100):
+            raise ValueError('first must be between 1 and 100')
+        param = {
+            'broadcaster_id': broadcaster_id,
+            'moderator_id': moderator_id,
+            'first': first,
+            'after': after
+        }
+        url = build_url(TWITCH_API_BASE_URL + 'moderation/blocked_terms', param, remove_none=True)
+        result = self.__api_get_request(url, AuthType.USER, [AuthScope.MODERATOR_READ_BLOCKED_TERMS])
+        return make_fields_datetime(result.json(), ['created_at', 'expires_at', 'updated_at'])
+
+    def add_blocked_term(self,
+                         broadcaster_id: str,
+                         moderator_id: str,
+                         text: str) -> dict:
+        """Adds a word or phrase to the broadcaster’s list of blocked terms. These are the terms that broadcasters don’t want used in their chat room.
+
+        Requires User authentication with scope :const:`twitchAPI.types.AuthScope.MODERATOR_MANAGE_BLOCKED_TERMS`\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#add-blocked-term
+
+        :param str broadcaster_id: The ID of the broadcaster that owns the list of blocked terms.
+        :param str moderator_id: The ID of a user that has permission to moderate the broadcaster’s chat room.
+                    This ID must match the user ID associated with the user OAuth token.
+        :param str text: The word or phrase to block from being used in the broadcaster’s chat room. Between 2 and 500 characters long
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid
+                        and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ValueError: if text is not between 2 and 500 characters long
+        :rtype: dict
+        """
+        if len(text) < 2 or len(text) > 500:
+            raise ValueError('text must have a length between 2 and 500 characters')
+        param = {
+            'broadcaster_id': broadcaster_id,
+            'moderator_id': moderator_id
+        }
+        url = build_url(TWITCH_API_BASE_URL + 'moderation/blocked_terms', param)
+        body = {'text': text}
+        result = self.__api_post_request(url, AuthType.USER, [AuthScope.MODERATOR_MANAGE_BLOCKED_TERMS], data=body)
+        return make_fields_datetime(result.json(), ['created_at', 'expires_at', 'updated_at'])
+
+    def remove_blocked_term(self,
+                            broadcaster_id: str,
+                            moderator_id: str,
+                            term_id: str) -> bool:
+        """Removes the word or phrase that the broadcaster is blocking users from using in their chat room.
+
+        Requires User authentication with scope :const:`twitchAPI.types.AuthScope.MODERATOR_MANAGE_BLOCKED_TERMS`\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#remove-blocked-term
+
+        :param str broadcaster_id: The ID of the broadcaster that owns the list of blocked terms.
+        :param str moderator_id: The ID of a user that has permission to moderate the broadcaster’s chat room.
+                        This ID must match the user ID associated with the user OAuth token.
+        :param str term_id: The ID of the blocked term you want to delete.
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid
+                        and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :rtype: bool
+        """
+        param = {
+            'broadcaster_id': broadcaster_id,
+            'moderator_id': moderator_id,
+            'id': term_id
+        }
+        url = build_url(TWITCH_API_BASE_URL + 'moderation/blocked_terms', param)
+        result = self.__api_delete_request(url, AuthType.USER, [AuthScope.MODERATOR_MANAGE_BLOCKED_TERMS])
+        return result.status_code == 204
 
     def get_moderators(self,
                        broadcaster_id: str,
@@ -1754,21 +1958,26 @@ class Twitch:
         return response.json()
 
     def get_channel_information(self,
-                                broadcaster_id: str) -> dict:
+                                broadcaster_id: Union[str, List[str]]) -> dict:
         """Gets channel information for users.\n\n
 
         Requires App or user authentication\n
         For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-channel-information
 
-        :param str broadcaster_id: ID of the channel to be updated
+        :param union[str,list[str]] broadcaster_id: ID of the channel to be updated, can either be a string or a
+                        list of strings with up to 100 entries
         :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
         :raises ~twitchAPI.types.UnauthorizedException: if app authentication is not set or invalid
         :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid
                         and a re authentication failed
         :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ValueError: if broadcaster_id is a list and does not have between 1 and 100 entries
         :rtype: dict
         """
-        url = build_url(TWITCH_API_BASE_URL + 'channels', {'broadcaster_id': broadcaster_id})
+        if isinstance(broadcaster_id, list):
+            if len(broadcaster_id) == 0 or len(broadcaster_id) > 100:
+                raise ValueError('broadcaster_id has to have between 1 and 100 entries')
+        url = build_url(TWITCH_API_BASE_URL + 'channels', {'broadcaster_id': broadcaster_id}, split_lists=True)
         response = self.__api_get_request(url, AuthType.EITHER, [])
         return response.json()
 
@@ -1801,7 +2010,7 @@ class Twitch:
         """
         if game_id is None and broadcaster_language is None and title is None:
             raise ValueError('You need to specify at least one of the optional parameter')
-        if len(title) == 0:
+        if title is not None and len(title) == 0:
             raise ValueError('title cant be a empty string')
         url = build_url(TWITCH_API_BASE_URL + 'channels',
                         {'broadcaster_id': broadcaster_id}, remove_none=True)
@@ -2688,7 +2897,7 @@ class Twitch:
         body = {
             'broadcaster_id': broadcaster_id,
             'id': poll_id,
-            status: status.value
+            'status': status.value
         }
         result = self.__api_patch_request(url, AuthType.USER, [AuthScope.CHANNEL_MANAGE_POLLS], data=body).json()
         result = fields_to_enum(result, ['status'], PollStatus, PollStatus.ACTIVE)
@@ -2748,7 +2957,7 @@ class Twitch:
 
         :param str broadcaster_id: The broadcaster running the prediction
         :param str title: Title of the Prediction
-        :param list[str] outcomes: List of possible Outcomes, must contain exactly 2 entries
+        :param list[str] outcomes: List of possible Outcomes, must contain between 2 and 10 entries
         :param int prediction_window: Total duration for the Prediction (in seconds). Minimum 1, Maximum 1800
         :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
         :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
@@ -2763,8 +2972,8 @@ class Twitch:
         """
         if prediction_window < 1 or prediction_window > 1800:
             raise ValueError('prediction_window must be in range 1 to 1800')
-        if len(outcomes) != 2:
-            raise ValueError('outcomes requires exactly 2 entries')
+        if len(outcomes) < 2 or len(outcomes) > 10:
+            raise ValueError('outcomes must have between 2 entries and 10 entries')
         body = {
             'broadcaster_id': broadcaster_id,
             'title': title,

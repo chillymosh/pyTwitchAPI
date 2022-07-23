@@ -4,6 +4,61 @@ Changelog
 =====================================
 
 ****************
+Version 2.5.7
+****************
+
+- Fixed the End Poll Endpoint
+- Properly define terminated poll status (thanks @iProdigy!)
+
+****************
+Version 2.5.6
+****************
+
+- Updated Create Prediction to take between 2 and 10 outcomes (thanks @lynara!)
+- Added "Get Creator Goals" Endpoint (thanks @gitagogaming!)
+- TwitchAPIException will now also include the message from the Twitch API when available
+
+****************
+Version 2.5.5
+****************
+
+- Added datetime parsing to `created_at` field for Ban User and Get Banned Users endpoints
+- fixed title length check failing if the title is None for Modify Channel Information endpoint (thanks @Meduris!)
+
+****************
+Version 2.5.4
+****************
+
+- Added the following new endpoints:
+
+  - "Ban User"
+
+  - "Unban User"
+
+  - "Get Blocked Terms"
+
+  - "Add Blocked Term"
+
+  - "Remove Blocked Term"
+
+- Added the following Auth Scopes:
+
+  - `moderator:manage:banned_users`
+
+  - `moderator:read:blocked_terms`
+
+  - `moderator:manage:blocked_terms`
+
+- Added additional debug logging to PubSub
+- Fixed KeyError when being rate limited
+
+****************
+Version 2.5.3
+****************
+
+- `Twitch.get_channel_info` now also optionally accepts a list of strings with up to 100 entries for the `broadcaster_id` parameter
+
+****************
 Version 2.5.2
 ****************
 
