@@ -12,12 +12,11 @@ you are interested in.
 Requirements
 ************
 
-You need to have a public IP with a port open. That port will be 80 by default.
-You need app authentication and your Endpoint URL must point to a
-
 .. note:: Please note that Your Endpoint URL has to be HTTPS, has to run on Port 443 and requires a valid, non self signed certificate
             This most likely means, that you need a reverse proxy like nginx. You can also hand in a valid ssl context to be used in the constructor.
 
+In the case that you don't hand in a valid ssl context to the constructor, you can specify any port you want in the constructor and handle the
+bridge between this program and your public URL on port 443 via reverse proxy.\n
 You can check on whether or not your webhook is publicly reachable by navigating to the URL set in `callback_url`.
 You should get a 200 response with the text `pyTwitchAPI eventsub`.
 
@@ -35,37 +34,53 @@ Short code example:
 
 .. code-block:: python
 
-    from pprint import pprint
-    from twitchAPI import Twitch, EventSub
+    from twitchAPI.twitch import Twitch
+    from twitchAPI.helper import first
+    from twitchAPI.eventsub import EventSub
+    import asyncio
 
-    # this will be called whenever someone follows the target channel
-    async def on_follow(data: dict):
-        pprint(data)
 
     TARGET_USERNAME = 'target_username_here'
-    WEBHOOK_URL = 'https://url.to.your.webhook.com'
+    EVENTSUB_URL = 'https://url.to.your.webhook.com'
     APP_ID = 'your_app_id'
     APP_SECRET = 'your_app_secret'
 
-    twitch = Twitch(APP_ID, APP_SECRET)
-    twitch.authenticate_app([])
 
-    uid = twitch.get_users(logins=[TARGET_USERNAME])
-    user_id = uid['data'][0]['id']
-    # basic setup, will run on port 8080 and a reverse proxy takes care of the https and certificate
-    hook = EventSub(WEBHOOK_URL, APP_ID, 8080, twitch)
-    # unsubscribe from all to get a clean slate
-    hook.unsubscribe_all()
-    # start client
-    hook.start()
-    print('subscribing to hooks:')
-    hook.listen_channel_follow(user_id, on_follow)
+    async def on_follow(data: dict):
+        # our event happend, lets do things with the data we got!
+        print(data)
 
-    try:
-        input('press Enter to shut down...')
-    finally:
-        hook.stop()
-    print('done')
+
+    async def eventsub_example():
+        # create the api instance and get the ID of the target user
+        twitch = await Twitch(APP_ID, APP_SECRET)
+        user = await first(twitch.get_users(logins=TARGET_USERNAME))
+
+        # basic setup, will run on port 8080 and a reverse proxy takes care of the https and certificate
+        event_sub = EventSub(EVENTSUB_URL, APP_ID, 8080, twitch)
+
+        # unsubscribe from all old events that might still be there
+        # this will ensure we have a clean slate
+        await event_sub.unsubscribe_all()
+        # start the eventsub client
+        event_sub.start()
+        # subscribing to the desired eventsub hook for our user
+        # the given function will be called every time this event is triggered
+        await event_sub.listen_channel_follow(user.id, on_follow)
+
+        # eventsub will run in its own process
+        # so lets just wait for user input before shutting it all down again
+        try:
+            input('press Enter to shut down...')
+        finally:
+            # stopping both eventsub as well as gracefully closing the connection to the API
+            await event_sub.stop()
+            await twitch.close()
+        print('done')
+
+
+    # lets run our example
+    asyncio.run(eventsub_example())
 
 ********************
 Class Documentation:
@@ -75,11 +90,12 @@ import datetime
 import random
 import string
 import time
-from typing import Union, Callable, Optional, Awaitable
+
+import aiohttp
+
 from .helper import TWITCH_API_BASE_URL, remove_none_values
 from .types import *
-import requests
-from aiohttp import web
+from aiohttp import web, ClientSession
 import threading
 import asyncio
 from logging import getLogger, Logger
@@ -89,6 +105,11 @@ from ssl import SSLContext
 from .types import EventSubSubscriptionTimeout, EventSubSubscriptionConflict, EventSubSubscriptionError
 import hmac
 import hashlib
+
+from typing import Union, Callable, Optional, Awaitable
+
+
+__all__ = ['CALLBACK_TYPE', 'EventSub']
 
 
 CALLBACK_TYPE = Callable[[dict], Awaitable[None]]
@@ -112,36 +133,30 @@ class EventSub:
                     |default| :code:`True`
     """
 
-    secret = ''.join(random.choice(string.ascii_lowercase) for i in range(20))
-    callback_url = None
-    wait_for_subscription_confirm: bool = True
-    wait_for_subscription_confirm_timeout: int = 30
-    unsubscribe_on_stop: bool = True
-    _port: int = 80
-    _host: str = '0.0.0.0'
-    __twitch: Twitch = None
-    __ssl_context = None
-    __client_id = None
-    __running = False
-    __callbacks = {}
-    __active_webhooks = {}
-    __hook_thread: Union['threading.Thread', None] = None
-    __hook_loop: Union['asyncio.AbstractEventLoop', None] = None
-    __hook_runner: Union['web.AppRunner', None] = None
-    __logger: Logger = None
-
     def __init__(self,
                  callback_url: str,
                  api_client_id: str,
                  port: int,
                  twitch: Twitch,
                  ssl_context: Optional[SSLContext] = None):
-        self.callback_url = callback_url
-        self.__client_id = api_client_id
-        self._port = port
-        self.__ssl_context = ssl_context
-        self.__twitch = twitch
-        self.__logger = getLogger('twitchAPI.eventsub')
+        self.callback_url: str = callback_url
+        self.__client_id: str = api_client_id
+        self._port: int = port
+        self.__ssl_context: Optional[SSLContext] = ssl_context
+        self.__twitch: Twitch = twitch
+        self.__logger: Logger = getLogger('twitchAPI.eventsub')
+        self.secret = ''.join(random.choice(string.ascii_lowercase) for i in range(20))
+        self.wait_for_subscription_confirm: bool = True
+        self.wait_for_subscription_confirm_timeout: int = 30
+        self.unsubscribe_on_stop: bool = True
+        self._host: str = '0.0.0.0'
+        self.__running = False
+        self.__callbacks = {}
+        self.__active_webhooks = {}
+        self.__hook_thread: Union['threading.Thread', None] = None
+        self.__hook_loop: Union['asyncio.AbstractEventLoop', None] = None
+        self.__hook_runner: Union['web.AppRunner', None] = None
+        self._session: aiohttp.ClientSession = None
         if not self.callback_url.startswith('https'):
             raise RuntimeError('HTTPS is required for authenticated webhook.\n'
                                + 'Either use non authenticated webhook or use a HTTPS proxy!')
@@ -153,9 +168,12 @@ class EventSub:
         return web.AppRunner(hook_app)
 
     def __run_hook(self, runner: 'web.AppRunner'):
+        async def _mk_session():
+            self._session = aiohttp.ClientSession()
         self.__hook_runner = runner
         self.__hook_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.__hook_loop)
+        self.__hook_loop.run_until_complete(_mk_session())
         self.__hook_loop.run_until_complete(runner.setup())
         site = web.TCPSite(runner, str(self._host), self._port, ssl_context=self.__ssl_context)
         self.__hook_loop.run_until_complete(site.start())
@@ -177,7 +195,7 @@ class EventSub:
         self.__running = True
         self.__hook_thread.start()
 
-    def stop(self):
+    async def stop(self):
         """Stops the EventSub client
 
         This also unsubscribes from all known subscriptions if unsubscribe_on_stop is True
@@ -185,7 +203,7 @@ class EventSub:
         :rtype: None
         """
         if self.__hook_runner is not None and self.unsubscribe_on_stop:
-            self.unsubscribe_all_known()
+            await self.unsubscribe_all_known()
         tasks = {t for t in asyncio.all_tasks(loop=self.__hook_loop) if not t.done()}
         for task in tasks:
             task.cancel()
@@ -207,17 +225,24 @@ class EventSub:
             'Authorization': f'Bearer {token}'
         }
 
-    def __api_post_request(self, url: str, data: Union[dict, None] = None):
+    # FIXME requires port
+    async def __api_post_request(self, url: str, data: Union[dict, None] = None):
         headers = self.__build_request_header()
-        return requests.post(url, headers=headers, json=data)
+        if self._session is None:
+            self._session = ClientSession()
+        return await self._session.post(url, headers=headers, json=data)
 
-    def __api_get_request(self, url: str):
+    async def __api_get_request(self, url: str):
         headers = self.__build_request_header()
-        return requests.get(url, headers=headers)
+        if self._session is None:
+            self._session = ClientSession()
+        return await self._session.get(url, headers=headers)
 
-    def __api_delete_request(self, url: str):
+    async def __api_delete_request(self, url: str):
         headers = self.__build_request_header()
-        return requests.delete(url, headers=headers)
+        if self._session is None:
+            self._session = ClientSession()
+        return await self._session.delete(url, headers=headers)
 
     def __add_callback(self, c_id: str, callback):
         self.__callbacks[c_id] = {'id': c_id, 'callback': callback, 'active': False}
@@ -225,7 +250,7 @@ class EventSub:
     def __activate_callback(self, c_id: str):
         self.__callbacks[c_id]['active'] = True
 
-    def _subscribe(self, sub_type: str, sub_version: str, condition: dict, callback) -> str:
+    async def _subscribe(self, sub_type: str, sub_version: str, condition: dict, callback) -> str:
         """"Subscribe to Twitch Topic"""
         self.__logger.debug(f'subscribe to {sub_type} version {sub_version} with condition {condition}')
         data = {
@@ -238,10 +263,10 @@ class EventSub:
                 'secret': self.secret
             }
         }
-        r_data = self.__api_post_request(TWITCH_API_BASE_URL + 'eventsub/subscriptions', data=data)
-        result = r_data.json()
+        r_data = await self.__api_post_request(TWITCH_API_BASE_URL + 'eventsub/subscriptions', data=data)
+        result = await r_data.json()
         error = result.get('error')
-        if r_data.status_code == 500:
+        if r_data.status == 500:
             raise TwitchBackendException(error)
         if error is not None:
             if error.lower() == 'conflict':
@@ -299,41 +324,37 @@ class EventSub:
             self.__hook_loop.create_task(callback['callback'](data))
         return web.Response(status=200)
 
-    def unsubscribe_all(self):
+    async def unsubscribe_all(self):
         """Unsubscribe from all subscriptions"""
-        ids = []
-        repeat = True
-        cursor = None
-        # get all ids
-        while repeat:
-            ret = self.__twitch.get_eventsub_subscriptions(after=cursor)
-            for d in ret.get('data', []):
-                ids.append(d.get('id'))
-            cursor = ret.get('pagination', {}).get('cursor')
-            repeat = cursor is not None
-        for _id in ids:
-            succ = self.__twitch.delete_eventsub_subscription(_id)
-            if not succ:
-                self.__logger.warning(f'failed to unsubscribe from event {_id}')
+        ret = await self.__twitch.get_eventsub_subscriptions()
+        async for d in ret:
+            try:
+                await self.__twitch.delete_eventsub_subscription(d.id)
+            except TwitchAPIException as e:
+                self.__logger.warning(f'failed to unsubscribe from event {d.id}: {str(e)}')
         self.__callbacks.clear()
 
-    def unsubscribe_all_known(self):
+    async def unsubscribe_all_known(self):
         """Unsubscribe from all subscriptions known to this client."""
         for key, value in self.__callbacks.items():
             self.__logger.debug(f'unsubscribe from event {key}')
-            succ = self.__twitch.delete_eventsub_subscription(key)
-            if not succ:
-                self.__logger.warning(f'failed to unsubscribe from event {key}')
+            try:
+                await self.__twitch.delete_eventsub_subscription(key)
+            except TwitchAPIException as e:
+                self.__logger.warning(f'failed to unsubscribe from event {key}: {str(e)}')
         self.__callbacks.clear()
 
-    def unsubscribe_topic(self, topic_id: str) -> bool:
+    async def unsubscribe_topic(self, topic_id: str) -> bool:
         """Unsubscribe from a specific topic."""
-        result = self.__twitch.delete_eventsub_subscription(topic_id)
-        if result:
+        try:
+            await self.__twitch.delete_eventsub_subscription(topic_id)
             self.__callbacks.pop(topic_id, None)
-        return result
+            return True
+        except TwitchAPIException as e:
+            self.__logger.warning(f'failed to unsubscribe from {topic_id}: {str(e)}')
+        return False
 
-    def listen_channel_update(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_update(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A broadcaster updates their channel properties e.g., category, title, mature flag, broadcast, or language.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelupdate
@@ -348,9 +369,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.update', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
+        return await self._subscribe('channel.update', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_channel_follow(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_follow(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A specified channel receives a follow.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelfollow
@@ -365,9 +386,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.follow', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
+        return await self._subscribe('channel.follow', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_channel_subscribe(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_subscribe(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A notification when a specified channel receives a subscriber. This does not include resubscribes.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelsubscribe
@@ -382,9 +403,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.subscribe', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
+        return await self._subscribe('channel.subscribe', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_channel_subscription_end(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_subscription_end(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A notification when a subscription to the specified channel ends.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelsubscriptionend
@@ -399,9 +420,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.subscription.end', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
+        return await self._subscribe('channel.subscription.end', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_channel_subscription_gift(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_subscription_gift(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A notification when a viewer gives a gift subscription to one or more users in the specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelsubscriptiongift
@@ -416,9 +437,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.subscription.gift', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
+        return await self._subscribe('channel.subscription.gift', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_channel_subscription_message(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_subscription_message(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A notification when a user sends a resubscription chat message in a specific channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelsubscriptionmessage
@@ -433,12 +454,12 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.subscription.message',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.subscription.message',
+                                     '1',
+                                     {'broadcaster_user_id': broadcaster_user_id},
+                                     callback)
 
-    def listen_channel_cheer(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_cheer(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A user cheers on the specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelcheer
@@ -453,15 +474,15 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.cheer',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.cheer',
+                                     '1',
+                                     {'broadcaster_user_id': broadcaster_user_id},
+                                     callback)
 
-    def listen_channel_raid(self,
-                            callback: CALLBACK_TYPE,
-                            to_broadcaster_user_id: Optional[str] = None,
-                            from_broadcaster_user_id: Optional[str] = None) -> str:
+    async def listen_channel_raid(self,
+                                  callback: CALLBACK_TYPE,
+                                  to_broadcaster_user_id: Optional[str] = None,
+                                  from_broadcaster_user_id: Optional[str] = None) -> str:
         """A broadcaster raids another broadcaster’s channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelraid
@@ -477,14 +498,14 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.raid',
-                               '1',
-                               remove_none_values({
-                                   'from_broadcaster_user_id': from_broadcaster_user_id,
-                                   'to_broadcaster_user_id': to_broadcaster_user_id}),
-                               callback)
+        return await self._subscribe('channel.raid',
+                                     '1',
+                                     remove_none_values({
+                                         'from_broadcaster_user_id': from_broadcaster_user_id,
+                                         'to_broadcaster_user_id': to_broadcaster_user_id}),
+                                     callback)
 
-    def listen_channel_ban(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_ban(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A viewer is banned from the specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelban
@@ -499,12 +520,12 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.ban',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.ban',
+                                     '1',
+                                     {'broadcaster_user_id': broadcaster_user_id},
+                                     callback)
 
-    def listen_channel_unban(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_unban(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A viewer is unbanned from the specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelunban
@@ -519,12 +540,12 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.unban',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.unban',
+                                     '1',
+                                     {'broadcaster_user_id': broadcaster_user_id},
+                                     callback)
 
-    def listen_channel_moderator_add(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_moderator_add(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """Moderator privileges were added to a user on a specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelmoderatoradd
@@ -539,12 +560,12 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.moderator.add',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.moderator.add',
+                                     '1',
+                                     {'broadcaster_user_id': broadcaster_user_id},
+                                     callback)
 
-    def listen_channel_moderator_remove(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_moderator_remove(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """Moderator privileges were removed from a user on a specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelmoderatorremove
@@ -559,13 +580,13 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.moderator.remove',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.moderator.remove',
+                                     '1',
+                                     {'broadcaster_user_id': broadcaster_user_id},
+                                     callback)
 
-    def listen_channel_points_custom_reward_add(self, broadcaster_user_id: str,
-                                                callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_points_custom_reward_add(self, broadcaster_user_id: str,
+                                                      callback: CALLBACK_TYPE) -> str:
         """A custom channel points reward has been created for the specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelchannel_points_custom_rewardadd
@@ -580,15 +601,15 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.channel_points_custom_reward.add',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.channel_points_custom_reward.add',
+                                     '1',
+                                     {'broadcaster_user_id': broadcaster_user_id},
+                                     callback)
 
-    def listen_channel_points_custom_reward_update(self,
-                                                   broadcaster_user_id: str,
-                                                   callback: CALLBACK_TYPE,
-                                                   reward_id: Optional[str] = None) -> str:
+    async def listen_channel_points_custom_reward_update(self,
+                                                         broadcaster_user_id: str,
+                                                         callback: CALLBACK_TYPE,
+                                                         reward_id: Optional[str] = None) -> str:
         """A custom channel points reward has been updated for the specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelchannel_points_custom_rewardupdate
@@ -604,17 +625,17 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.channel_points_custom_reward.update',
-                               '1',
-                               remove_none_values({
-                                   'broadcaster_user_id': broadcaster_user_id,
-                                   'reward_id': reward_id}),
-                               callback)
+        return await self._subscribe('channel.channel_points_custom_reward.update',
+                                     '1',
+                                     remove_none_values({
+                                         'broadcaster_user_id': broadcaster_user_id,
+                                         'reward_id': reward_id}),
+                                     callback)
 
-    def listen_channel_points_custom_reward_remove(self,
-                                                   broadcaster_user_id: str,
-                                                   callback: CALLBACK_TYPE,
-                                                   reward_id: Optional[str] = None) -> str:
+    async def listen_channel_points_custom_reward_remove(self,
+                                                         broadcaster_user_id: str,
+                                                         callback: CALLBACK_TYPE,
+                                                         reward_id: Optional[str] = None) -> str:
         """A custom channel points reward has been removed from the specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelchannel_points_custom_rewardremove
@@ -630,17 +651,17 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.channel_points_custom_reward.remove',
-                               '1',
-                               remove_none_values({
-                                   'broadcaster_user_id': broadcaster_user_id,
-                                   'reward_id': reward_id}),
-                               callback)
+        return await self._subscribe('channel.channel_points_custom_reward.remove',
+                                     '1',
+                                     remove_none_values({
+                                         'broadcaster_user_id': broadcaster_user_id,
+                                         'reward_id': reward_id}),
+                                     callback)
 
-    def listen_channel_points_custom_reward_redemption_add(self,
-                                                           broadcaster_user_id: str,
-                                                           callback: CALLBACK_TYPE,
-                                                           reward_id: Optional[str] = None) -> str:
+    async def listen_channel_points_custom_reward_redemption_add(self,
+                                                                 broadcaster_user_id: str,
+                                                                 callback: CALLBACK_TYPE,
+                                                                 reward_id: Optional[str] = None) -> str:
         """A viewer has redeemed a custom channel points reward on the specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelchannel_points_custom_reward_redemptionadd
@@ -656,17 +677,17 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.channel_points_custom_reward_redemption.add',
-                               '1',
-                               remove_none_values({
-                                   'broadcaster_user_id': broadcaster_user_id,
-                                   'reward_id': reward_id}),
-                               callback)
+        return await self._subscribe('channel.channel_points_custom_reward_redemption.add',
+                                     '1',
+                                     remove_none_values({
+                                         'broadcaster_user_id': broadcaster_user_id,
+                                         'reward_id': reward_id}),
+                                     callback)
 
-    def listen_channel_points_custom_reward_redemption_update(self,
-                                                              broadcaster_user_id: str,
-                                                              callback: CALLBACK_TYPE,
-                                                              reward_id: Optional[str] = None) -> str:
+    async def listen_channel_points_custom_reward_redemption_update(self,
+                                                                    broadcaster_user_id: str,
+                                                                    callback: CALLBACK_TYPE,
+                                                                    reward_id: Optional[str] = None) -> str:
         """A redemption of a channel points custom reward has been updated for the specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelchannel_points_custom_reward_redemptionupdate
@@ -682,14 +703,14 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.channel_points_custom_reward_redemption.update',
-                               '1',
-                               remove_none_values({
-                                   'broadcaster_user_id': broadcaster_user_id,
-                                   'reward_id': reward_id}),
-                               callback)
+        return await self._subscribe('channel.channel_points_custom_reward_redemption.update',
+                                     '1',
+                                     remove_none_values({
+                                         'broadcaster_user_id': broadcaster_user_id,
+                                         'reward_id': reward_id}),
+                                     callback)
 
-    def listen_channel_poll_begin(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_poll_begin(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A poll started on a specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelpollbegin
@@ -704,12 +725,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.poll.begin',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.poll.begin', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_channel_poll_progress(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_poll_progress(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """Users respond to a poll on a specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelpollprogress
@@ -724,12 +742,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.poll.progress',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.poll.progress', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_channel_poll_end(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_poll_end(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A poll ended on a specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelpollend
@@ -744,12 +759,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.poll.end',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.poll.end', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_channel_prediction_begin(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_prediction_begin(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A Prediction started on a specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelpredictionbegin
@@ -764,12 +776,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.prediction.begin',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.prediction.begin', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_channel_prediction_progress(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_prediction_progress(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """Users participated in a Prediction on a specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelpredictionprogress
@@ -784,12 +793,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.prediction.progress',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.prediction.progress', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_channel_prediction_lock(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_prediction_lock(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A Prediction was locked on a specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelpredictionlock
@@ -804,12 +810,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.prediction.lock',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.prediction.lock', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_channel_prediction_end(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_channel_prediction_end(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A Prediction ended on a specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelpredictionend
@@ -824,16 +827,13 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.prediction.end',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.prediction.end', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_drop_entitlement_grant(self,
-                                      organisation_id: str,
-                                      callback: CALLBACK_TYPE,
-                                      category_id: Optional[str] = None,
-                                      campaign_id: Optional[str] = None) -> str:
+    async def listen_drop_entitlement_grant(self,
+                                            organisation_id: str,
+                                            callback: CALLBACK_TYPE,
+                                            category_id: Optional[str] = None,
+                                            campaign_id: Optional[str] = None) -> str:
         """An entitlement for a Drop is granted to a user.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#dropentitlementgrant
@@ -852,18 +852,18 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('drop.entitlement.grant',
-                               '1',
-                               remove_none_values({
-                                   'organization_id': organisation_id,
-                                   'category_id': category_id,
-                                   'campaign_id': campaign_id
-                               }),
-                               callback)
+        return await self._subscribe('drop.entitlement.grant',
+                                     '1',
+                                     remove_none_values({
+                                         'organization_id': organisation_id,
+                                         'category_id': category_id,
+                                         'campaign_id': campaign_id
+                                     }),
+                                     callback)
 
-    def listen_extension_bits_transaction_create(self,
-                                                 extension_client_id: str,
-                                                 callback: CALLBACK_TYPE) -> str:
+    async def listen_extension_bits_transaction_create(self,
+                                                       extension_client_id: str,
+                                                       callback: CALLBACK_TYPE) -> str:
         """A Bits transaction occurred for a specified Twitch Extension.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#extensionbits_transactioncreate
@@ -878,12 +878,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('extension.bits_transaction.create',
-                               '1',
-                               {'extension_client_id': extension_client_id},
-                               callback)
+        return await self._subscribe('extension.bits_transaction.create', '1', {'extension_client_id': extension_client_id}, callback)
 
-    def listen_goal_begin(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_goal_begin(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A goal begins on the specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelgoalbegin
@@ -898,12 +895,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.goal.begin',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.goal.begin', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_goal_progress(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_goal_progress(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A goal makes progress on the specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelgoalprogress
@@ -918,12 +912,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.goal.progress',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.goal.progress', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_goal_end(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_goal_end(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A goal ends on the specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelgoalend
@@ -938,12 +929,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.goal.end',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.goal.end', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_hype_train_begin(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_hype_train_begin(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A Hype Train begins on the specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelhype_trainbegin
@@ -958,12 +946,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.hype_train.begin',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.hype_train.begin', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_hype_train_progress(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_hype_train_progress(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A Hype Train makes progress on the specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelhype_trainprogress
@@ -978,12 +963,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.hype_train.progress',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.hype_train.progress', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_hype_train_end(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_hype_train_end(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """A Hype Train ends on the specified channel.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#channelhype_trainend
@@ -998,12 +980,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('channel.hype_train.end',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('channel.hype_train.end', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_stream_online(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_stream_online(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """The specified broadcaster starts a stream.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#streamonline
@@ -1018,12 +997,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('stream.online',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('stream.online', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_stream_offline(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_stream_offline(self, broadcaster_user_id: str, callback: CALLBACK_TYPE) -> str:
         """The specified broadcaster stops a stream.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#streamoffline
@@ -1038,12 +1014,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('stream.offline',
-                               '1',
-                               {'broadcaster_user_id': broadcaster_user_id},
-                               callback)
+        return await self._subscribe('stream.offline', '1', {'broadcaster_user_id': broadcaster_user_id}, callback)
 
-    def listen_user_authorization_grant(self, client_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_user_authorization_grant(self, client_id: str, callback: CALLBACK_TYPE) -> str:
         """A user’s authorization has been granted to your client id.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#userauthorizationgrant
@@ -1058,12 +1031,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('user.authorization.grant',
-                               '1',
-                               {'client_id': client_id},
-                               callback)
+        return await self._subscribe('user.authorization.grant', '1', {'client_id': client_id}, callback)
 
-    def listen_user_authorization_revoke(self, client_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_user_authorization_revoke(self, client_id: str, callback: CALLBACK_TYPE) -> str:
         """A user’s authorization has been revoked for your client id.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#userauthorizationrevoke
@@ -1078,12 +1048,9 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('user.authorization.revoke',
-                               '1',
-                               {'client_id': client_id},
-                               callback)
+        return await self._subscribe('user.authorization.revoke', '1', {'client_id': client_id}, callback)
 
-    def listen_user_update(self, user_id: str, callback: CALLBACK_TYPE) -> str:
+    async def listen_user_update(self, user_id: str, callback: CALLBACK_TYPE) -> str:
         """A user has updated their account.
 
         For more information see here: https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types#userupdate
@@ -1098,7 +1065,4 @@ class EventSub:
         :raises ~twitchAPI.types.TwitchBackendException: if the subscription failed due to a twitch backend error
         :rtype: str
         """
-        return self._subscribe('user.update',
-                               '1',
-                               {'user_id': user_id},
-                               callback)
+        return await self._subscribe('user.update', '1', {'user_id': user_id}, callback)

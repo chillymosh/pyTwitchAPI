@@ -3,14 +3,22 @@
 
 import urllib.parse
 import uuid
-from typing import Union, List, Type, Optional
+from typing import AsyncGenerator, TypeVar
 from json import JSONDecodeError
 from aiohttp.web import Request
 from dateutil import parser as du_parser
 from enum import Enum
+
 from .types import AuthScope
 from urllib.parse import urlparse, parse_qs
 
+from typing import Union, List, Type, Optional
+
+__all__ = ['TWITCH_API_BASE_URL', 'TWITCH_AUTH_BASE_URL', 'TWITCH_PUB_SUB_URL', 'TWITCH_CHAT_URL',
+           'build_url', 'get_uuid', 'get_json', 'build_scope', 'fields_to_enum', 'make_enum',
+           'enum_value_or_none', 'datetime_to_str', 'remove_none_values', 'ResultType', 'first']
+
+T = TypeVar('T')
 
 TWITCH_API_BASE_URL = "https://api.twitch.tv/helix/"
 TWITCH_AUTH_BASE_URL = "https://id.twitch.tv/"
@@ -18,15 +26,10 @@ TWITCH_PUB_SUB_URL = "wss://pubsub-edge.twitch.tv"
 TWITCH_CHAT_URL = "wss://irc-ws.chat.twitch.tv:443"
 
 
-def extract_uuid_str_from_url(url: str) -> Union[str, None]:
-    """Extracts a UUID string from a URL
-
-    :param str url: The URL to parse
-    :return: UUID string extracted from given URL or None if no UUID found
-    :rtype: Union[str, None]
-    """
-    uuids = parse_qs(urlparse(url).query).get('uuid', [])
-    return uuids[0] if len(uuids) > 0 else None
+class ResultType(Enum):
+    RETURN_TYPE = 0
+    STATUS_CODE = 1
+    TEXT = 2
 
 
 def build_url(url: str, params: dict, remove_none=False, split_lists=False, enum_value=True) -> str:
@@ -41,6 +44,7 @@ def build_url(url: str, params: dict, remove_none=False, split_lists=False, enum
     :return: URL
     :rtype: str
     """
+
     def get_val(val):
         if not enum_value:
             return str(val)
@@ -55,6 +59,7 @@ def build_url(url: str, params: dict, remove_none=False, split_lists=False, enum
         if v is not None:
             res += "=" + urllib.parse.quote(get_val(v))
         return res
+
     result = ""
     for key, value in params.items():
         if value is None and remove_none:
@@ -87,40 +92,6 @@ async def get_json(request: 'Request') -> Union[list, dict, None]:
         return data
     except JSONDecodeError:
         return None
-
-
-def make_fields_datetime(data: Union[dict, list], fields: List[str]):
-    """Itterates over dict or list recursivly to replace string fields with datetime
-
-    :param union[dict, list] data: dict or list
-    :param list[str] fields: list of keys to be replaced
-    :rtype: union[dict, list]
-    """
-
-    def make_str_field_datetime(data, fields: list):
-        if isinstance(data, str) and data in fields:
-            if data == '':
-                return None
-            return du_parser.isoparse(data)
-        return data
-
-    def make_dict_field_datetime(data: dict, fields: list) -> dict:
-        fd = data
-        for key, value in data.items():
-            if isinstance(value, str):
-                fd[key] = make_str_field_datetime(value, fields)
-            elif isinstance(value, dict):
-                fd[key] = make_dict_field_datetime(value, fields)
-            elif isinstance(value, list):
-                fd[key] = make_fields_datetime(value, fields)
-        return fd
-
-    if isinstance(data, list):
-        return [make_fields_datetime(d, fields) for d in data]
-    elif isinstance(data, dict):
-        return make_dict_field_datetime(data, fields)
-    else:
-        return make_str_field_datetime(data, fields)
 
 
 def build_scope(scopes: List[AuthScope]) -> str:
@@ -170,6 +141,7 @@ def fields_to_enum(data: Union[dict, list],
             elif isinstance(value, list):
                 fd[key] = fields_to_enum(value, fields, _enum, default)
         return fd
+
     if isinstance(data, list):
         return [make_dict_field_enum(d, fields, _enum, default) for d in data]
     else:
@@ -196,3 +168,10 @@ def remove_none_values(d: dict) -> dict:
     """Removes items where the value is None from the dict.
     This returns a new dict and does not manipulate the one given."""
     return {k: v for k, v in d.items() if v is not None}
+
+
+async def first(gen: AsyncGenerator[T, None]) -> T:
+    """Returns the first value of the given AsyncGenerator
+
+    :param ~typing.AsyncGenerator gen: The generator from which you want the first value"""
+    return await gen.__anext__()

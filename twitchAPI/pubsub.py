@@ -58,9 +58,12 @@ import json
 from random import randrange
 import datetime
 from logging import getLogger, Logger
-from typing import Callable, List, Dict
 from uuid import UUID
 from time import sleep
+
+from typing import Callable, List, Dict
+
+__all__ = ['PubSub']
 
 
 class PubSub:
@@ -78,28 +81,22 @@ class PubSub:
                                         |default| :code:`30`
     """
 
-    ping_frequency: int = 120
-    ping_jitter: int = 4
-    listen_confirm_timeout: int = 30
-    reconnect_delay_steps: List[int] = [1, 2, 4, 8, 16, 32, 64, 128]
-
-    __twitch: Twitch = None
-    __connection = None
-    __socket_thread: threading.Thread = None
-    __running: bool = False
-    __socket_loop = None
-    __topics: dict = {}
-    __startup_complete: bool = False
-
-    __tasks = None
-
-    __waiting_for_pong: bool = False
-    __logger: Logger = None
-    __nonce_waiting_confirm: dict = {}
-
     def __init__(self, twitch: Twitch):
-        self.__twitch = twitch
-        self.__logger = getLogger('twitchAPI.pubsub')
+        self.__twitch: Twitch = twitch
+        self.__logger: Logger = getLogger('twitchAPI.pubsub')
+        self.ping_frequency: int = 120
+        self.ping_jitter: int = 4
+        self.listen_confirm_timeout: int = 30
+        self.reconnect_delay_steps: List[int] = [1, 2, 4, 8, 16, 32, 64, 128]
+        self.__connection = None
+        self.__socket_thread: threading.Thread = None
+        self.__running: bool = False
+        self.__socket_loop = None
+        self.__topics: dict = {}
+        self.__startup_complete: bool = False
+        self.__tasks = None
+        self.__waiting_for_pong: bool = False
+        self.__nonce_waiting_confirm: dict = {}
 
     def start(self) -> None:
         """
@@ -332,17 +329,15 @@ class PubSub:
                         callback_func: Callable[[UUID, dict], None]) -> UUID:
         """
         You are notified when anyone whispers the specified user or the specified user whispers to anyone.\n
-        Requires the :const:`twitchAPI.types.AuthScope.WHISPERS_READ` AuthScope.\n
+        Requires the :const:`~twitchAPI.types.AuthScope.WHISPERS_READ` AuthScope.\n
 
-        :param str user_id: ID of the User
-        :param Callable[[~uuid.UUID,dict],None] callback_func: Function called on event
+        :param user_id: ID of the User
+        :param callback_func: Function called on event
         :return: UUID of this subscription
-        :rtype: ~uuid.UUID
         :raises ~twitchAPI.types.TwitchAuthorizationException: if Token is not valid
         :raises ~twitchAPI.types.TwitchBackendException: if the Twitch Server has a problem
         :raises ~twitchAPI.types.TwitchAPIException: if the subscription response is something else than suspected
-        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by
-                `listen_confirm_timeout`
+        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
         return self.__generic_listen(f'whispers.{user_id}', callback_func, [AuthScope.WHISPERS_READ])
@@ -352,17 +347,15 @@ class PubSub:
                        callback_func: Callable[[UUID, dict], None]) -> UUID:
         """
         You are notified when anyone cheers in the specified channel.\n
-        Requires the :const:`twitchAPI.types.AuthScope.BITS_READ` AuthScope.\n
+        Requires the :const:`~twitchAPI.types.AuthScope.BITS_READ` AuthScope.\n
 
-        :param str channel_id: ID of the Channel
-        :param Callable[[~uuid.UUID,dict],None] callback_func: Function called on event
+        :param channel_id: ID of the Channel
+        :param callback_func: Function called on event
         :return: UUID of this subscription
-        :rtype: ~uuid.UUID
         :raises ~twitchAPI.types.TwitchAuthorizationException: if Token is not valid
         :raises ~twitchAPI.types.TwitchBackendException: if the Twitch Server has a problem
         :raises ~twitchAPI.types.TwitchAPIException: if the subscription response is something else than suspected
-        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by
-                `listen_confirm_timeout`
+        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
         return self.__generic_listen(f'channel-bits-events-v1.{channel_id}', callback_func, [AuthScope.BITS_READ])
@@ -372,17 +365,15 @@ class PubSub:
                     callback_func: Callable[[UUID, dict], None]) -> UUID:
         """
         You are notified when anyone cheers in the specified channel.\n
-        Requires the :const:`twitchAPI.types.AuthScope.BITS_READ` AuthScope.\n
+        Requires the :const:`~twitchAPI.types.AuthScope.BITS_READ` AuthScope.\n
 
-        :param str channel_id: ID of the Channel
-        :param Callable[[~uuid.UUID,dict],None] callback_func: Function called on event
+        :param channel_id: ID of the Channel
+        :param callback_func: Function called on event
         :return: UUID of this subscription
-        :rtype: ~uuid.UUID
         :raises ~twitchAPI.types.TwitchAuthorizationException: if Token is not valid
         :raises ~twitchAPI.types.TwitchBackendException: if the Twitch Server has a problem
         :raises ~twitchAPI.types.TwitchAPIException: if the subscription response is something else than suspected
-        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by
-                `listen_confirm_timeout`
+        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
         return self.__generic_listen(f'channel-bits-events-v2.{channel_id}', callback_func, [AuthScope.BITS_READ])
@@ -393,17 +384,15 @@ class PubSub:
         """
         You are notified when a user earns a new Bits badge in the given channel,
         and chooses to share the notification with chat.\n
-        Requires the :const:`twitchAPI.types.AuthScope.BITS_READ` AuthScope.\n
+        Requires the :const:`~twitchAPI.types.AuthScope.BITS_READ` AuthScope.\n
 
-        :param str channel_id: ID of the Channel
-        :param Callable[[~uuid.UUID,dict],None] callback_func: Function called on event
+        :param channel_id: ID of the Channel
+        :param callback_func: Function called on event
         :return: UUID of this subscription
-        :rtype: ~uuid.UUID
         :raises ~twitchAPI.types.TwitchAuthorizationException: if Token is not valid
         :raises ~twitchAPI.types.TwitchBackendException: if the Twitch Server has a problem
         :raises ~twitchAPI.types.TwitchAPIException: if the subscription response is something else than suspected
-        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by
-                `listen_confirm_timeout`
+        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
         return self.__generic_listen(f'channel-bits-badge-unlocks.{channel_id}', callback_func, [AuthScope.BITS_READ])
@@ -413,17 +402,15 @@ class PubSub:
                               callback_func: Callable[[UUID, dict], None]) -> UUID:
         """
         You are notified when a custom reward is redeemed in the channel.\n
-        Requires the :const:`twitchAPI.types.AuthScope.CHANNEL_READ_REDEMPTIONS` AuthScope.\n
+        Requires the :const:`~twitchAPI.types.AuthScope.CHANNEL_READ_REDEMPTIONS` AuthScope.\n
 
-        :param str channel_id: ID of the Channel
-        :param Callable[[~uuid.UUID,dict],None] callback_func: Function called on event
+        :param channel_id: ID of the Channel
+        :param callback_func: Function called on event
         :return: UUID of this subscription
-        :rtype: ~uuid.UUID
         :raises ~twitchAPI.types.TwitchAuthorizationException: if Token is not valid
         :raises ~twitchAPI.types.TwitchBackendException: if the Twitch Server has a problem
         :raises ~twitchAPI.types.TwitchAPIException: if the subscription response is something else than suspected
-        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by
-                `listen_confirm_timeout`
+        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
         return self.__generic_listen(f'channel-points-channel-v1.{channel_id}',
@@ -436,17 +423,15 @@ class PubSub:
         """
         You are notified when anyone subscribes (first month), resubscribes (subsequent months),
         or gifts a subscription to a channel. Subgift subscription messages contain recipient information.\n
-        Requires the :const:`twitchAPI.types.AuthScope.CHANNEL_READ_SUBSCRIPTIONS` AuthScope.\n
+        Requires the :const:`~twitchAPI.types.AuthScope.CHANNEL_READ_SUBSCRIPTIONS` AuthScope.\n
 
-        :param str channel_id: ID of the Channel
-        :param Callable[[~uuid.UUID,dict],None] callback_func: Function called on event
+        :param channel_id: ID of the Channel
+        :param callback_func: Function called on event
         :return: UUID of this subscription
-        :rtype: ~uuid.UUID
         :raises ~twitchAPI.types.TwitchAuthorizationException: if Token is not valid
         :raises ~twitchAPI.types.TwitchBackendException: if the Twitch Server has a problem
         :raises ~twitchAPI.types.TwitchAPIException: if the subscription response is something else than suspected
-        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by
-                `listen_confirm_timeout`
+        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
         return self.__generic_listen(f'channel-subscribe-events-v1.{channel_id}',
@@ -461,18 +446,16 @@ class PubSub:
         Supports moderators listening to the topic, as well as users listening to the topic to receive their own events.
         Examples of moderator actions are bans, unbans, timeouts, deleting messages,
         changing chat mode (followers-only, subs-only), changing AutoMod levels, and adding a mod.\n
-        Requires the :const:`twitchAPI.types.AuthScope.CHANNEL_MODERATE` AuthScope.\n
+        Requires the :const:`~twitchAPI.types.AuthScope.CHANNEL_MODERATE` AuthScope.\n
 
-        :param str user_id: ID of the User
-        :param str channel_id: ID of the Channel
-        :param Callable[[~uuid.UUID,dict],None] callback_func: Function called on event
+        :param user_id: ID of the User
+        :param channel_id: ID of the Channel
+        :param callback_func: Function called on event
         :return: UUID of this subscription
-        :rtype: ~uuid.UUID
         :raises ~twitchAPI.types.TwitchAuthorizationException: if Token is not valid
         :raises ~twitchAPI.types.TwitchBackendException: if the Twitch Server has a problem
         :raises ~twitchAPI.types.TwitchAPIException: if the subscription response is something else than suspected
-        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by
-                `listen_confirm_timeout`
+        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
         return self.__generic_listen(f'chat_moderator_actions.{user_id}.{channel_id}',
@@ -485,18 +468,16 @@ class PubSub:
                              callback_func: Callable[[UUID, dict], None]) -> UUID:
         """
         AutoMod flags a message as potentially inappropriate, and when a moderator takes action on a message.\n
-        Requires the :const:`twitchAPI.types.AuthScope.CHANNEL_MODERATE` AuthScope.\n
+        Requires the :const:`~twitchAPI.types.AuthScope.CHANNEL_MODERATE` AuthScope.\n
 
-        :param str moderator_id: ID of the Moderator
-        :param str channel_id: ID of the Channel
-        :param Callable[[~uuid.UUID,dict],None] callback_func: Function called on event
+        :param moderator_id: ID of the Moderator
+        :param channel_id: ID of the Channel
+        :param callback_func: Function called on event
         :return: UUID of this subscription
-        :rtype: ~uuid.UUID
         :raises ~twitchAPI.types.TwitchAuthorizationException: if Token is not valid
         :raises ~twitchAPI.types.TwitchBackendException: if the Twitch Server has a problem
         :raises ~twitchAPI.types.TwitchAPIException: if the subscription response is something else than suspected
-        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by
-                `listen_confirm_timeout`
+        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
         return self.__generic_listen(f'automod-queue.{moderator_id}.{channel_id}',
@@ -509,18 +490,16 @@ class PubSub:
                                              callback_func: Callable[[UUID, dict], None]) -> UUID:
         """
         A user’s message held by AutoMod has been approved or denied.\n
-        Requires the :const:`twitchAPI.types.AuthScope.CHAT_READ` AuthScope.\n
+        Requires the :const:`~twitchAPI.types.AuthScope.CHAT_READ` AuthScope.\n
 
-        :param str user_id: ID of the User
-        :param str channel_id: ID of the Channel
-        :param Callable[[~uuid.UUID,dict],None] callback_func: Function called on event
+        :param user_id: ID of the User
+        :param channel_id: ID of the Channel
+        :param callback_func: Function called on event
         :return: UUID of this subscription
-        :rtype: ~uuid.UUID
         :raises ~twitchAPI.types.TwitchAuthorizationException: if Token is not valid
         :raises ~twitchAPI.types.TwitchBackendException: if the Twitch Server has a problem
         :raises ~twitchAPI.types.TwitchAPIException: if the subscription response is something else than suspected
-        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by
-                `listen_confirm_timeout`
+        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
         return self.__generic_listen(f'user-moderation-notifications.{user_id}.{channel_id}',
@@ -537,14 +516,12 @@ class PubSub:
 
         .. warning:: Using a undocumented topic can break at any time, use at your own risk!
 
-        :param str topic: the topic string
-        :param Callable[[~uuid.UUID,dict],None] callback_func: Function called on event
-        :rtype: ~uuid.UUID
+        :param topic: the topic string
+        :param callback_func: Function called on event
         :raises ~twitchAPI.types.TwitchAuthorizationException: if Token is not valid or does not have the required AuthScope
         :raises ~twitchAPI.types.TwitchBackendException: if the Twitch Server has a problem
         :raises ~twitchAPI.types.TwitchAPIException: if the subscription response is something else than suspected
-        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by
-                `listen_confirm_timeout`
+        :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         """
         self.__logger.warning(f"using undocumented topic {topic}")
         return self.__generic_listen(topic, callback_func, [])

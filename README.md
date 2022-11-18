@@ -26,13 +26,22 @@ Setting up an Instance of the Twitch API and get your User ID:
 
 ```python
 from twitchAPI.twitch import Twitch
+from twitchAPI.helper import first
+import asyncio
 
-# create instance of twitch API and create app authentication
-twitch = Twitch('my_app_id', 'my_app_secret')
+async def twitch_example():
+    # initialize the twitch instance, this will by default also create a app authentication for you
+    twitch = await Twitch('app_id', 'app_secret')
+    # call the API for the data of your twitch user
+    # this returns a async generator that can be used to iterate over all results
+    # but we are just interested in the first result
+    # using the first helper makes this easy.
+    user = await first(twitch.get_users(logins='your_twitch_user'))
+    # print the ID of your user or do whatever else you want with it
+    print(user.id)
 
-# get ID of user
-user_info = twitch.get_users(logins=['my_username'])
-user_id = user_info['data'][0]['id']
+# run this example
+asyncio.run(twitch_example())
 ```
 
 ### Authentication
@@ -50,7 +59,7 @@ App authentication is super simple, just do the following:
 
 ```python
 from twitchAPI.twitch import Twitch
-twitch = Twitch('my_app_id', 'my_app_secret')
+twitch = await Twitch('my_app_id', 'my_app_secret')
 ```
 
 ### User Authentication
@@ -65,21 +74,21 @@ from twitchAPI.twitch import Twitch
 from twitchAPI.oauth import UserAuthenticator
 from twitchAPI.types import AuthScope
 
-twitch = Twitch('my_app_id', 'my_app_secret')
+twitch = await Twitch('my_app_id', 'my_app_secret')
 
 target_scope = [AuthScope.BITS_READ]
 auth = UserAuthenticator(twitch, target_scope, force_verify=False)
 # this will open your default browser and prompt you with the twitch verification website
-token, refresh_token = auth.authenticate()
+token, refresh_token = await auth.authenticate()
 # add User authentication
-twitch.set_user_authentication(token, target_scope, refresh_token)
+await twitch.set_user_authentication(token, target_scope, refresh_token)
 ```
 
 You can reuse this token and use the refresh_token to renew it:
 
 ```python
 from twitchAPI.oauth import refresh_access_token
-new_token, new_refresh_token = refresh_access_token('refresh_token', 'client_id', 'client_secret')
+new_token, new_refresh_token = await refresh_access_token('refresh_token', 'client_id', 'client_secret')
 ```
 
 ### AuthToken refresh callback
@@ -95,7 +104,7 @@ def user_refresh(token: str, refresh_token: str):
 def app_refresh(token: str):
     print(f'my new app token is: {token}')
 
-twitch = Twitch('my_app_id', 'my_app_secret')
+twitch = await Twitch('my_app_id', 'my_app_secret')
 twitch.app_auth_refresh_callback = app_refresh
 twitch.user_auth_refresh_callback = user_refresh
 ```
@@ -159,35 +168,51 @@ The function you hand in as callback will be called whenever that event happens 
 ### Short code example:
 
 ```python
-from pprint import pprint
-from twitchAPI import Twitch, EventSub
+from twitchAPI.twitch import Twitch
+from twitchAPI.helper import first
+from twitchAPI.eventsub import EventSub
+import asyncio
 
-# this will be called whenever someone follows the target channel
-async def on_follow(data: dict):
-    pprint(data)
 
 TARGET_USERNAME = 'target_username_here'
-WEBHOOK_URL = 'https://url.to.your.webhook.com'
+EVENTSUB_URL = 'https://url.to.your.webhook.com'
 APP_ID = 'your_app_id'
 APP_SECRET = 'your_app_secret'
 
-twitch = Twitch(APP_ID, APP_SECRET)
-twitch.authenticate_app([])
 
-uid = twitch.get_users(logins=[TARGET_USERNAME])
-user_id = uid['data'][0]['id']
-# basic setup, will run on port 8080 and a reverse proxy takes care of the https and certificate
-hook = EventSub(WEBHOOK_URL, APP_ID, 8080, twitch)
-# unsubscribe from all to get a clean slate
-hook.unsubscribe_all()
-# start client
-hook.start()
-print('subscribing to hooks:')
-hook.listen_channel_follow(user_id, on_follow)
+async def on_follow(data: dict):
+    # our event happend, lets do things with the data we got!
+    print(data)
 
-try:
-    input('press Enter to shut down...')
-finally:
-    hook.stop()
-print('done')
+
+async def eventsub_example():
+    # create the api instance and get the ID of the target user
+    twitch = await Twitch(APP_ID, APP_SECRET)
+    user = await first(twitch.get_users(logins=TARGET_USERNAME))
+
+    # basic setup, will run on port 8080 and a reverse proxy takes care of the https and certificate
+    event_sub = EventSub(EVENTSUB_URL, APP_ID, 8080, twitch)
+    
+    # unsubscribe from all old events that might still be there
+    # this will ensure we have a clean slate
+    await event_sub.unsubscribe_all()
+    # start the eventsub client
+    event_sub.start()
+    # subscribing to the desired eventsub hook for our user
+    # the given function will be called every time this event is triggered
+    await event_sub.listen_channel_follow(user.id, on_follow)
+
+    # eventsub will run in its own process
+    # so lets just wait for user input before shutting it all down again
+    try:
+        input('press Enter to shut down...')
+    finally:
+        # stopping both eventsub as well as gracefully closing the connection to the API
+        await event_sub.stop()
+        await twitch.close()
+    print('done')
+
+
+# lets run our example
+asyncio.run(eventsub_example())
 ```

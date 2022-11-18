@@ -48,28 +48,35 @@ Code example
 Class Documentation:
 ********************
 """
+import aiohttp
+
 from .twitch import Twitch
 from .helper import build_url, build_scope, get_uuid, TWITCH_AUTH_BASE_URL, fields_to_enum
 from .types import AuthScope, InvalidRefreshTokenException, UnauthorizedException, TwitchAPIException
-from typing import List, Union
+from typing import Optional, Callable
 import webbrowser
 from aiohttp import web
 import asyncio
 from threading import Thread
 from time import sleep
-import requests
 from concurrent.futures._base import CancelledError
 from logging import getLogger, Logger
 
+from typing import List, Union
 
-def refresh_access_token(refresh_token: str,
-                         app_id: str,
-                         app_secret: str):
+__all__ = ['refresh_access_token', 'validate_token', 'get_user_info', 'revoke_token', 'UserAuthenticator']
+
+
+async def refresh_access_token(refresh_token: str,
+                               app_id: str,
+                               app_secret: str,
+                               session: Optional[aiohttp.ClientSession] = None):
     """Simple helper function for refreshing a user access token.
 
     :param str refresh_token: the current refresh_token
     :param str app_id: the id of your app
     :param str app_secret: the secret key of your app
+    :param ~aiohttp.ClientSession session: optionally a active client session to be used for the web request to avoid having to open a new one
     :return: access_token, refresh_token
     :raises ~twitchAPI.types.InvalidRefreshTokenException: if refresh token is invalid
     :raises ~twitchAPI.types.UnauthorizedException: if both refresh and access token are invalid (eg if the user changes
@@ -83,8 +90,11 @@ def refresh_access_token(refresh_token: str,
         'client_secret': app_secret
     }
     url = build_url(TWITCH_AUTH_BASE_URL + 'oauth2/token', {})
-    result = requests.post(url, data=param)
-    data = result.json()
+    ses = session if session is not None else aiohttp.ClientSession()
+    async with ses.post(url, data=param) as result:
+        data = await result.json()
+    if session is None:
+        await ses.close()
     if data.get('status', 200) == 400:
         raise InvalidRefreshTokenException(data.get('message', ''))
     if data.get('status', 200) == 401:
@@ -92,29 +102,57 @@ def refresh_access_token(refresh_token: str,
     return data['access_token'], data['refresh_token']
 
 
-def validate_token(access_token: str) -> dict:
+async def validate_token(access_token: str,
+                         session: Optional[aiohttp.ClientSession] = None) -> dict:
     """Helper function for validating a user or app access token.
 
-    https://dev.twitch.tv/docs/authentication#validating-requests
+    https://dev.twitch.tv/docs/authentication/validate-tokens
 
-    :param str access_token: either a user or app OAuth access token
+    :param access_token: either a user or app OAuth access token
+    :param session: optionally a active client session to be used for the web request to avoid having to open a new one
     :return: response from the api
-    :rtype: dict
     """
     header = {'Authorization': f'OAuth {access_token}'}
     url = build_url(TWITCH_AUTH_BASE_URL + 'oauth2/validate', {})
-    result = requests.get(url, headers=header)
-    data = result.json()
+    ses = session if session is not None else aiohttp.ClientSession()
+    async with ses.get(url, headers=header) as result:
+        data = await result.json()
+    if session is None:
+        await ses.close()
     return fields_to_enum(data, ['scopes'], AuthScope, None)
 
 
-def revoke_token(client_id: str, access_token: str) -> bool:
+async def get_user_info(access_token: str,
+                        session: Optional[aiohttp.ClientSession] = None) -> dict:
+    """Helper function to get claims information from an OAuth2 access token.
+
+    https://dev.twitch.tv/docs/authentication/getting-tokens-oidc/#getting-claims-information-from-an-access-token
+
+    :param access_token: a OAuth2 access token
+    :param session: optionally a active client session to be used for the web request to avoid having to open a new one
+    :return: response from the API
+    """
+    header = {'Authorization': f'Bearer {access_token}',
+              'Content-Type': 'application/json'}
+    url = build_url(TWITCH_AUTH_BASE_URL + 'oauth2/userinfo', {})
+    ses = session if session is not None else aiohttp.ClientSession()
+    async with ses.get(url, headers=header) as result:
+        data = await result.json()
+    if session is None:
+        await ses.close()
+    return data
+
+
+async def revoke_token(client_id: str,
+                       access_token: str,
+                       session: Optional[aiohttp.ClientSession] = None) -> bool:
     """Helper function for revoking a user or app OAuth access token.
 
-    https://dev.twitch.tv/docs/authentication#revoking-access-tokens
+    https://dev.twitch.tv/docs/authentication/revoke-tokens
 
     :param str client_id: client id belonging to the access token
     :param str access_token: user or app OAuth access token
+    :param ~aiohttp.ClientSession session: optionally a active client session to be used for the web request to avoid having to open a new one
     :rtype: bool
     :return: :code:`True` if revoking succeeded, otherwise :code:`False`
     """
@@ -122,8 +160,12 @@ def revoke_token(client_id: str, access_token: str) -> bool:
         'client_id': client_id,
         'token': access_token
     })
-    result = requests.post(url)
-    return result.status_code == 200
+    ses = session if session is not None else aiohttp.ClientSession()
+    async with ses.post(url) as result:
+        ret = result.status == 200
+    if session is None:
+        await ses.close()
+    return ret
 
 
 class UserAuthenticator:
@@ -140,51 +182,38 @@ class UserAuthenticator:
         :var str host: the host the webserver will bind to. |default| :code:`0.0.0.0`
        """
 
-    __document: str = """<!DOCTYPE html>
- <html lang="en">
- <head>
-     <meta charset="UTF-8">
-     <title>pyTwitchAPI OAuth</title>
- </head>
- <body>
-     <h1>Thanks for Authenticating with pyTwitchAPI!</h1>
- You may now close this page.
- </body>
- </html>"""
-
-    __twitch: 'Twitch' = None
-    port: int = 17563
-    url: str = 'http://localhost:17563'
-    host: str = '0.0.0.0'
-    scopes: List[AuthScope] = []
-    force_verify: bool = False
-    __state: str = str(get_uuid())
-    __logger: Logger = None
-
-    __client_id: str = None
-
-    __callback_func = None
-
-    __server_running: bool = False
-    __loop: Union['asyncio.AbstractEventLoop', None] = None
-    __runner: Union['web.AppRunner', None] = None
-    __thread: Union['threading.Thread', None] = None
-
-    __user_token: Union[str, None] = None
-
-    __can_close: bool = False
-
     def __init__(self,
                  twitch: 'Twitch',
                  scopes: List[AuthScope],
                  force_verify: bool = False,
                  url: str = 'http://localhost:17563'):
-        self.__twitch = twitch
-        self.__client_id = twitch.app_id
-        self.scopes = scopes
-        self.force_verify = force_verify
-        self.__logger = getLogger('twitchAPI.oauth')
+        self.__twitch: 'Twitch' = twitch
+        self.__client_id: str = twitch.app_id
+        self.scopes: List[AuthScope] = scopes
+        self.force_verify: bool = force_verify
+        self.__logger: Logger = getLogger('twitchAPI.oauth')
         self.url = url
+        self.__document: str = """<!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <title>pyTwitchAPI OAuth</title>
+        </head>
+        <body>
+            <h1>Thanks for Authenticating with pyTwitchAPI!</h1>
+        You may now close this page.
+        </body>
+        </html>"""
+        self.port: int = 17563
+        self.host: str = '0.0.0.0'
+        self.__state: str = str(get_uuid())
+        self.__callback_func = None
+        self.__server_running: bool = False
+        self.__loop: Union[asyncio.AbstractEventLoop, None] = None
+        self.__runner: Union[web.AppRunner, None] = None
+        self.__thread: Union[Thread, None] = None
+        self.__user_token: Union[str, None] = None
+        self.__can_close: bool = False
 
     def __build_auth_url(self):
         params = {
@@ -211,7 +240,7 @@ class UserAuthenticator:
         for task in asyncio.all_tasks(self.__loop):
             task.cancel()
 
-    def __run(self, runner: 'web.AppRunner'):
+    def __run(self, runner: web.AppRunner):
         self.__runner = runner
         self.__loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.__loop)
@@ -236,7 +265,7 @@ class UserAuthenticator:
         """
         self.__can_close = True
 
-    async def __handle_callback(self, request: 'web.Request'):
+    async def __handle_callback(self, request: web.Request):
         val = request.rel_url.query.get('state')
         self.__logger.debug(f'got callback with state {val}')
         # invalid state!
@@ -253,15 +282,16 @@ class UserAuthenticator:
     def return_auth_url(self):
         return self.__build_auth_url()
 
-    def authenticate(self,
-                     callback_func=None, user_token=None):
+    async def authenticate(self,
+                           callback_func: Optional[Callable[[str, str], None]] = None,
+                           user_token: Optional[str] = None):
         """Start the user authentication flow\n
         If callback_func is not set, authenticate will wait till the authentication process finished and then return
         the access_token and the refresh_token
         If user_token is set, it will be used instead of launching the webserver and opening the browser
 
         :param callback_func: Function to call once the authentication finished.
-        :param str user_token: Code obtained from twitch to request the access and refresh token.
+        :param user_token: Code obtained from twitch to request the access and refresh token.
         :return: None if callback_func is set, otherwise access_token and refresh_token
         :raises ~twitchAPI.types.TwitchAPIException: if authentication fails
         :rtype: None or (str, str)
@@ -289,12 +319,13 @@ class UserAuthenticator:
             'redirect_uri': self.url
         }
         url = build_url(TWITCH_AUTH_BASE_URL + 'oauth2/token', param)
-        response = requests.post(url)
-        data: dict = response.json()
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url) as response:
+                data: dict = await response.json()
         if callback_func is None:
             self.stop()
             if data.get('access_token') is None:
                 raise TwitchAPIException(f'Authentication failed:\n{str(data)}')
             return data['access_token'], data['refresh_token']
         elif user_token is not None:
-            self.__callback_func(self.__user_token)
+            self.__callback_func(data['access_token'], data['refresh_token'])

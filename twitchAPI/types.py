@@ -4,6 +4,16 @@ from dataclasses import dataclass
 from enum import Enum
 from typing_extensions import TypedDict
 
+__all__ = ['AnalyticsReportType', 'AuthScope', 'ModerationEventType', 'TimePeriod', 'SortMethod', 'HypeTrainContributionMethod',
+           'VideoType', 'AuthType', 'StatusCode', 'PubSubResponseError', 'CustomRewardRedemptionStatus', 'SortOrder',
+           'BlockSourceContext', 'BlockReason', 'EntitlementFulfillmentStatus', 'PollStatus', 'PredictionStatus', 'AutoModAction',
+           'AutoModCheckEntry', 'DropsEntitlementFulfillmentStatus',
+           'ChatEvent', 'ChatRoom',
+           'TwitchAPIException', 'InvalidRefreshTokenException', 'InvalidTokenException', 'NotFoundException', 'TwitchAuthorizationException',
+           'UnauthorizedException', 'MissingScopeException', 'TwitchBackendException', 'PubSubListenTimeoutException', 'MissingAppSecretException',
+           'EventSubSubscriptionTimeout', 'EventSubSubscriptionConflict', 'EventSubSubscriptionError', 'DeprecatedError', 'TwitchResourceNotFound',
+           'ForbiddenError']
+
 
 class AnalyticsReportType(Enum):
     """Enum of all Analytics report types
@@ -51,10 +61,18 @@ class AuthScope(Enum):
     CHANNEL_MANAGE_PREDICTIONS = 'channel:manage:predictions'
     MODERATOR_MANAGE_AUTOMOD = 'moderator:manage:automod'
     CHANNEL_MANAGE_SCHEDULE = 'channel:manage:schedule'
-    CHANNEL_MANAGE_CHAT_SETTINGS = 'channel:manage:chat_settings'
+    MODERATOR_MANAGE_CHAT_SETTINGS = 'moderator:manage:chat_settings'
     MODERATOR_MANAGE_BANNED_USERS = 'moderator:manage:banned_users'
     MODERATOR_READ_BLOCKED_TERMS = 'moderator:read:blocked_terms'
     MODERATOR_MANAGE_BLOCKED_TERMS = 'moderator:manage:blocked_terms'
+    CHANNEL_MANAGE_RAIDS = 'channel:manage:raids'
+    MODERATOR_MANAGE_ANNOUNCEMENTS = 'moderator:manage:announcements'
+    MODERATOR_MANAGE_CHAT_MESSAGES = 'moderator:manage:chat_messages'
+    USER_MANAGE_CHAT_COLOR = 'user:manage:chat_color'
+    CHANNEL_MANAGE_MODERATORS = 'channel:manage:moderators'
+    CHANNEL_READ_VIPS = 'channel:read:vips'
+    CHANNEL_MANAGE_VIPS = 'channel:manage:vips'
+    USER_MANAGE_WHISPERS = 'user:manage:whispers'
 
 
 class ModerationEventType(Enum):
@@ -111,7 +129,7 @@ class AuthType(Enum):
     EITHER = 3
 
 
-class CodeStatus(Enum):
+class StatusCode(Enum):
     """Enum Code Status, see https://dev.twitch.tv/docs/api/reference#get-code-status for more documentation
     """
     SUCCESSFULLY_REDEEMED = 'SUCCESSFULLY_REDEEMED'
@@ -201,6 +219,13 @@ class AutoModAction(Enum):
     DENY = 'DENY'
 
 
+class DropsEntitlementFulfillmentStatus(Enum):
+    """
+    """
+    CLAIMED = 'CLAIMED'
+    FULFILLED = 'FULFILLED'
+
+
 class AutoModCheckEntry(TypedDict):
     msg_id: str
     """Developer-generated identifier for mapping messages to results."""
@@ -214,7 +239,19 @@ class AutoModCheckEntry(TypedDict):
 
 class ChatEvent(Enum):
     READY = 'ready'
+    """Triggered when the bot is started up and ready"""
     MESSAGE = 'message'
+    """Triggered when someone wrote a message in a chat channel"""
+    SUB = 'sub'
+    """Triggered when someone subscribed to a channel"""
+    RAID = 'raid'
+    """Triggered when a channel gets raided"""
+    ROOM_STATE_CHANGE = 'room_state_change'
+    """Triggered when a chat channel is changed (e.g. sub only mode was enabled)"""
+    JOIN = 'join'
+    """Triggered when someone other than the bot joins a chat channel"""
+    JOINED = 'joined'
+    """Triggered when the bot joins a chat channel"""
 
 
 @dataclass
@@ -299,4 +336,14 @@ class EventSubSubscriptionError(TwitchAPIException):
 
 class DeprecatedError(TwitchAPIException):
     """If something has been marked as deprecated by the Twitch API"""
+    pass
+
+
+class TwitchResourceNotFound(TwitchAPIException):
+    """If a requested resource was not found"""
+    pass
+
+
+class ForbiddenError(TwitchAPIException):
+    """If you are not allowed to do that"""
     pass
