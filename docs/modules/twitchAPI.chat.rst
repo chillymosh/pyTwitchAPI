@@ -1,5 +1,5 @@
 ﻿
-.. automodule:: twitchAPI.helper
+.. automodule:: twitchAPI.chat
     :members:
     :undoc-members:
     :show-inheritance:

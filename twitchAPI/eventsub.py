@@ -1,7 +1,9 @@
 #  Copyright (c) 2021. Lena "Teekeks" During <info@teawork.de>
 """
-Full Implementation of the Twitch EventSub
-------------------------------------------
+EventSub Client
+---------------
+
+EventSub lets you listen for events that happen on Twitch.
 
 The EventSub client runs in its own thread, calling the given callback function whenever an event happens.
 
@@ -28,9 +30,9 @@ After you started your EventSub client, you can use the :code:`listen_` prefixed
 
 The function you hand in as callback will be called whenever that event happens with the event data as a parameter.
 
-*******************
-Short code example:
-*******************
+************
+Code Example
+************
 
 .. code-block:: python
 
@@ -82,9 +84,9 @@ Short code example:
     # lets run our example
     asyncio.run(eventsub_example())
 
-********************
-Class Documentation:
-********************
+*******************
+Class Documentation
+*******************
 """
 import datetime
 import random
@@ -117,20 +119,6 @@ CALLBACK_TYPE = Callable[[dict], Awaitable[None]]
 
 class EventSub:
     """EventSub integration for the Twitch Helix API.
-
-    :param str callback_url: The full URL of the webhook.
-    :param str api_client_id: The id of your API client
-    :param int port: the port on which this webhook should run
-    :param ~ssl.SSLContext ssl_context: optional ssl context to be used |default| :code:`None`
-    :param ~twitchAPI.twitch.Twitch twitch:  a app authenticated instance of :code:`Twitch`
-    :var str secret: A random secret string. Set this for added security.
-    :var str callback_url: The full URL of the webhook.
-    :var bool wait_for_subscription_confirm: Set this to false if you don't want to wait for a subscription confirm.
-                    |default| :code:`True`
-    :var int wait_for_subscription_confirm_timeout: Max time in seconds to wait for a subscription confirmation.
-                    Only used if ``wait_for_subscription_confirm`` is set to True. |default| :code:`30`
-    :var bool unsubscribe_on_stop: Unsubscribe all currently active Webhooks on calling `stop()`
-                    |default| :code:`True`
     """
 
     def __init__(self,
@@ -139,16 +127,29 @@ class EventSub:
                  port: int,
                  twitch: Twitch,
                  ssl_context: Optional[SSLContext] = None):
+        """
+        :param callback_url: The full URL of the webhook.
+        :param api_client_id: The id of your API client
+        :param port: the port on which this webhook should run
+        :param twitch: a app authenticated instance of :const:`~twitchAPI.twitch.Twitch`
+        :param ssl_context: optional ssl context to be used |default| :code:`None`
+        """
         self.callback_url: str = callback_url
+        """The full URL of the webhook."""
         self.__client_id: str = api_client_id
         self._port: int = port
         self.__ssl_context: Optional[SSLContext] = ssl_context
         self.__twitch: Twitch = twitch
         self.__logger: Logger = getLogger('twitchAPI.eventsub')
-        self.secret = ''.join(random.choice(string.ascii_lowercase) for i in range(20))
+        self.secret: str = ''.join(random.choice(string.ascii_lowercase) for i in range(20))
+        """A random secret string. Set this for added security. |default| :code:`A random 20 character long string`"""
         self.wait_for_subscription_confirm: bool = True
+        """Set this to false if you don't want to wait for a subscription confirm. |default| :code:`True`"""
         self.wait_for_subscription_confirm_timeout: int = 30
+        """Max time in seconds to wait for a subscription confirmation. Only used if ``wait_for_subscription_confirm`` is set to True. 
+            |default| :code:`30`"""
         self.unsubscribe_on_stop: bool = True
+        """Unsubscribe all currently active Webhooks on calling :const:`~twitchAPI.eventsub.EventSub.stop()` |default| :code:`True`"""
         self._host: str = '0.0.0.0'
         self.__running = False
         self.__callbacks = {}
@@ -169,7 +170,8 @@ class EventSub:
 
     def __run_hook(self, runner: 'web.AppRunner'):
         async def _mk_session():
-            self._session = aiohttp.ClientSession()
+            if self._session is None:
+                self._session = aiohttp.ClientSession()
         self.__hook_runner = runner
         self.__hook_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.__hook_loop)
@@ -207,6 +209,9 @@ class EventSub:
         tasks = {t for t in asyncio.all_tasks(loop=self.__hook_loop) if not t.done()}
         for task in tasks:
             task.cancel()
+        if self._session is not None:
+            await self._session.close()
+            await asyncio.sleep(0.25)
         self.__hook_loop.call_soon_threadsafe(self.__hook_loop.stop)
         self.__hook_runner = None
         self.__running = False

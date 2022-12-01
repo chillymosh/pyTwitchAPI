@@ -22,7 +22,8 @@ copyright = '2022, Lena "Teekeks" During'
 author = 'Lena "Teekeks" During'
 
 # The full version, including alpha/beta/rc tags
-release = '2.5.4'
+release = 'v3.0.1'
+language = 'en'
 
 master_doc = 'index'
 
@@ -41,6 +42,7 @@ extensions = [
 ]
 
 autodoc_member_order = 'bysource'
+autodoc_class_signature = 'separated'
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
@@ -64,17 +66,42 @@ rst_prolog = """
 def setup(app):
     app.add_css_file('css/custom.css')
 
-# -- Options for HTML output -------------------------------------------------
 
-# The theme to use for HTML and HTML Help pages.  See the documentation for
-# a list of builtin themes.
-#
-import os
-on_rtd = os.environ.get('READTHEDOCS') == 'True'
-if on_rtd:
-    html_theme = 'default'
-else:
-    html_theme = 'classic'
+html_theme = 'pydata_sphinx_theme'
+
+# Define the json_url for our version switcher.
+json_url = "https://pytwitchapi.readthedocs.io/en/latest/_static/switcher.json"
+
+# Define the version we use for matching in the version switcher.
+version_match = os.environ.get("READTHEDOCS_VERSION")
+# If READTHEDOCS_VERSION doesn't exist, we're not on RTD
+# If it is an integer, we're in a PR build and the version isn't correct.
+if not version_match or version_match.isdigit():
+    # For local development, infer the version to match from the package.
+    # release = release
+    if "dev" in release or "rc" in release:
+        version_match = "latest"
+        # We want to keep the relative reference if we are in dev mode
+        # but we want the whole url if we are effectively in a released version
+        json_url = "_static/switcher.json"
+    else:
+        version_match = release
+
+html_theme_options = {
+    "switcher": {
+        "json_url": json_url,
+        "version_match": version_match,
+    },
+    "header_links_before_dropdown": 4,
+    "navbar_center": ["version-switcher", "navbar-nav"],
+    "github_url": "https://github.com/Teekeks/pyTwitchAPI",
+    "navbar_align": "left",
+    "logo": {
+        "text": "twitchAPI",
+        "image_light": "logo.png",
+        "image_dark": "logo.png"
+    }
+}
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,

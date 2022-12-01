@@ -20,7 +20,7 @@ You can set that `here in your twitch dev dashboard <https://dev.twitch.tv/conso
 Requirements for server environment
 ***********************************
 
-You need the user code provided by Twitch when the user logs-in at the url returned by :code:`return_auth_url`.
+You need the user code provided by Twitch when the user logs-in at the url returned by :const:`~twitchAPI.oauth.UserAuthenticator.return_auth_url()`.
 
 Create the UserAuthenticator with the URL of your webserver that will handle the redirect, and add it as a "OAuth Redirect URL"
 You can set that `here in your twitch dev dashboard <https://dev.twitch.tv/console>`__.
@@ -44,9 +44,9 @@ Code example
     # add User authentication
     twitch.set_user_authentication(token, target_scope, refresh_token)
 
-********************
-Class Documentation:
-********************
+*******************
+Class Documentation
+*******************
 """
 import aiohttp
 
@@ -170,16 +170,6 @@ async def revoke_token(client_id: str,
 
 class UserAuthenticator:
     """Simple to use client for the Twitch User authentication flow.
-
-        :param ~twitchAPI.twitch.Twitch twitch: A twitch instance
-        :param list[~twitchAPI.types.AuthScope] scopes: List of the desired Auth scopes
-        :param bool force_verify: If this is true, the user will always be prompted for authorization by twitch,
-                    |default| :code:`False`
-        :param str url: The reachable URL that will be opened in the browser.
-                    |default| :code:`http://localhost:17563`
-
-        :var int port: The port that will be used. |default| :code:`17653`
-        :var str host: the host the webserver will bind to. |default| :code:`0.0.0.0`
        """
 
     def __init__(self,
@@ -187,13 +177,20 @@ class UserAuthenticator:
                  scopes: List[AuthScope],
                  force_verify: bool = False,
                  url: str = 'http://localhost:17563'):
+        """
+
+        :param twitch: A twitch instance
+        :param scopes: List of the desired Auth scopes
+        :param force_verify: If this is true, the user will always be prompted for authorization by twitch |default| :code:`False`
+        :param url: The reachable URL that will be opened in the browser. |default| :code:`http://localhost:17563`
+        """
         self.__twitch: 'Twitch' = twitch
         self.__client_id: str = twitch.app_id
         self.scopes: List[AuthScope] = scopes
         self.force_verify: bool = force_verify
         self.__logger: Logger = getLogger('twitchAPI.oauth')
         self.url = url
-        self.__document: str = """<!DOCTYPE html>
+        self.document: str = """<!DOCTYPE html>
         <html lang="en">
         <head>
             <meta charset="UTF-8">
@@ -204,8 +201,11 @@ class UserAuthenticator:
         You may now close this page.
         </body>
         </html>"""
+        """The document that will be rendered at the end of the flow"""
         self.port: int = 17563
+        """The port that will be used. |default| :code:`17653`"""
         self.host: str = '0.0.0.0'
+        """the host the webserver will bind to. |default| :code:`0.0.0.0`"""
         self.__state: str = str(get_uuid())
         self.__callback_func = None
         self.__server_running: bool = False
@@ -277,14 +277,17 @@ class UserAuthenticator:
             return web.Response(status=400)
         if self.__callback_func is not None:
             self.__callback_func(self.__user_token)
-        return web.Response(text=self.__document, content_type='text/html')
+        return web.Response(text=self.document, content_type='text/html')
 
     def return_auth_url(self):
+        """Returns the URL that will authenticate the app, used for headless server environments."""
         return self.__build_auth_url()
 
     async def authenticate(self,
                            callback_func: Optional[Callable[[str, str], None]] = None,
-                           user_token: Optional[str] = None):
+                           user_token: Optional[str] = None,
+                           browser_name: Optional[str] = None,
+                           browser_new: int = 2):
         """Start the user authentication flow\n
         If callback_func is not set, authenticate will wait till the authentication process finished and then return
         the access_token and the refresh_token
@@ -292,6 +295,12 @@ class UserAuthenticator:
 
         :param callback_func: Function to call once the authentication finished.
         :param user_token: Code obtained from twitch to request the access and refresh token.
+        :param browser_name: The browser that should be used, None means that the system default is used.
+                            See `the webbrowser documentation <https://docs.python.org/3/library/webbrowser.html#webbrowser.register>`__ for more info
+                            |default|:code:`None`
+        :param browser_new: controls in which way the link will be opened in the browser.
+                            See `the webbrowser documentation <https://docs.python.org/3/library/webbrowser.html#webbrowser.open>`__ for more info
+                            |default|:code:`2`
         :return: None if callback_func is set, otherwise access_token and refresh_token
         :raises ~twitchAPI.types.TwitchAPIException: if authentication fails
         :rtype: None or (str, str)
@@ -304,7 +313,8 @@ class UserAuthenticator:
             while not self.__server_running:
                 sleep(0.01)
             # open in browser
-            webbrowser.open(self.__build_auth_url(), new=2)
+            browser = webbrowser.get(browser_name)
+            browser.open(self.__build_auth_url(), new=browser_new)
             while self.__user_token is None:
                 sleep(0.01)
             # now we need to actually get the correct token

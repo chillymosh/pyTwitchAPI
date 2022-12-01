@@ -1,7 +1,86 @@
-.. twitchAPI_changelog:
+:orphan:
 
 Changelog
-=====================================
+=========
+
+****************
+Version 3.0.1
+****************
+
+- Fixed bug which resulted in :code:`Timeout context manager should be used inside a task` when subscribing to more than one EventSub topic
+
+****************
+Version 3.0.0
+****************
+
+.. note:: This Version is a major rework of the library. Please see the :doc:`v3-migration` to learn how to migrate.
+
+**Highlights**
+
+- Library is now fully async
+- Twitch API responses are now Objects and Generators instead of pure dictionaries
+- Automatic Pagination of API results
+- First alpha of a Chat Bot implementation
+- More customizability for the UserAuthenticator
+- A lot of new Endpoints where added
+- New look and content for the documentation
+
+**Full Changelog**
+
+* Rewrote the twitchAPI to be async
+* twitchAPI now uses Objects instead of dictionaries
+* added automatic pagination to all relevant API endpoints
+* PubSub now uses async callbacks
+* EventSub subscribing and unsubscribing is now async
+* Added a alpha version of a Twitch Chat Bot implementation
+* switched AuthScope `CHANNEL_MANAGE_CHAT_SETTINGS` to `MODERATOR_MANAGE_CHAT_SETTINGS`
+* Added the following AuthScopes:
+
+  * :const:`~twitchAPI.types.AuthScope.MODERATOR_MANAGE_ANNOUNCEMENTS`
+  * :const:`~twitchAPI.types.AuthScope.MODERATOR_MANAGE_CHAT_MESSAGES`
+  * :const:`~twitchAPI.types.AuthScope.USER_MANAGE_CHAT_COLOR`
+  * :const:`~twitchAPI.types.AuthScope.CHANNEL_MANAGE_MODERATORS`
+  * :const:`~twitchAPI.types.AuthScope.CHANNEL_READ_VIPS`
+  * :const:`~twitchAPI.types.AuthScope.CHANNEL_MANAGE_VIPS`
+  * :const:`~twitchAPI.types.AuthScope.USER_MANAGE_WHISPERS`
+* added :const:`~twitchAPI.helper.first()` helper function
+
+* Added the following new Endpoints:
+
+  * "Send Whisper" :const:`~twitchAPI.twitch.Twitch.send_whisper()`
+  * "Remove Channel VIP" :const:`~twitchAPI.twitch.Twitch.remove_channel_vip()`
+  * "Add Channel VIP" :const:`~twitchAPI.twitch.Twitch.add_channel_vip()`
+  * "Get VIPs" :const:`~twitchAPI.twitch.Twitch.get_vips()`
+  * "Add Channel Moderator" :const:`~twitchAPI.twitch.Twitch.add_channel_moderator()`
+  * "Remove Channel Moderator" :const:`~twitchAPI.twitch.Twitch.remove_channel_moderator()`
+  * "Get User Chat Color" :const:`~twitchAPI.twitch.Twitch.get_user_chat_color()`
+  * "Update User Chat Color" :const:`~twitchAPI.twitch.Twitch.update_user_chat_color()`
+  * "Delete Chat Message" :const:`~twitchAPI.twitch.Twitch.delete_chat_message()`
+  * "Send Chat Announcement" :const:`~twitchAPI.twitch.Twitch.send_chat_announcement()`
+  * "Get Soundtrack Current Track" :const:`~twitchAPI.twitch.Twitch.get_soundtrack_current_track()`
+  * "Get Soundtrack Playlist" :const:`~twitchAPI.twitch.Twitch.get_soundtrack_playlist()`
+  * "Get Soundtrack Playlists" :const:`~twitchAPI.twitch.Twitch.get_soundtrack_playlists()`
+* Removed the folllowing deprecated Endpoints:
+
+  * "Get Banned Event"
+  * "Get Moderator Events"
+  * "Get Webhook Subscriptions"
+* The following Endpoints got changed:
+
+  * Added `igdb_id` search parameter to :const:`~twitchAPI.twitch.Twitch.get_games()`
+  * Removed the Voting related fields in :const:`~twitchAPI.twitch.Twitch.create_poll()` due to being deprecated
+  * Updated the logic in :const:`~twitchAPI.twitch.Twitch.update_custom_reward()` to avoid API errors
+  * Removed `id` parameter from :const:`~twitchAPI.twitch.Twitch.get_hype_train_events()`
+  * Fixed the range check in :const:`~twitchAPI.twitch.Twitch.get_channel_information()`
+* :const:`~twitchAPI.twitch.Twitch.app_auth_refresh_callback` and :const:`~twitchAPI.twitch.Twitch.user_auth_refresh_callback` are now async
+* Added :const:`~twitchAPI.oauth.get_user_info()`
+* UserAuthenticator:
+
+  * You can now set the document that will be shown at the end of the Auth flow by setting :const:`~twitchAPI.oauth.UserAuthenticator.document`
+  * The optional callback is now called with the access and refresh token instead of the user token
+  * Added browser controls to :const:`~twitchAPI.oauth.UserAuthenticator.authenticate()`
+* removed :code:`requests` and :code:`websockets` libraries from the requirements (resulting in smaller library footprint)
+
 
 ****************
 Version 2.5.7

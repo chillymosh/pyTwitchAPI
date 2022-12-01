@@ -1,16 +1,16 @@
 #  Copyright (c) 2020. Lena "Teekeks" During <info@teawork.de>
 """
-The Twitch API client
----------------------
+Twitch API
+----------
 
 This is the base of this library, it handles authentication renewal, error handling and permission management.
 
 Look at the `Twitch API reference <https://dev.twitch.tv/docs/api/reference>`__ for a more detailed documentation on
 what each endpoint does.
 
-**************
-Example Usage:
-**************
+*************
+Example Usage
+*************
 
 .. code-block:: python
 
@@ -28,6 +28,7 @@ Example Usage:
         user = await first(twitch.get_users(logins='your_twitch_user'))
         # print the ID of your user or do whatever else you want with it
         print(user.id)
+        await twitch.close()
 
     # run this example
     asyncio.run(twitch_example())
@@ -183,32 +184,27 @@ Optionally you can set a callback for both user access token refresh and app acc
 
     from twitchAPI.twitch import Twitch
 
-    def user_refresh(token: str, refresh_token: str):
+    async def user_refresh(token: str, refresh_token: str):
         print(f'my new user token is: {token}')
 
-    def app_refresh(token: str):
+    async def app_refresh(token: str):
         print(f'my new app token is: {token}')
 
     twitch = await Twitch('my_app_id', 'my_app_secret')
     twitch.app_auth_refresh_callback = app_refresh
     twitch.user_auth_refresh_callback = user_refresh
 
-********************
-Class Documentation:
-********************
+*******************
+Class Documentation
+*******************
 """
 import asyncio
-
 from aiohttp import ClientSession, ClientResponse
-
-from .helper import build_url, TWITCH_API_BASE_URL, TWITCH_AUTH_BASE_URL, build_scope, \
-    enum_value_or_none, datetime_to_str, remove_none_values, ResultType
+from .helper import TWITCH_API_BASE_URL, TWITCH_AUTH_BASE_URL, build_scope, enum_value_or_none, datetime_to_str, remove_none_values, ResultType
 from logging import getLogger, Logger
-
 from .object import *
 from .types import *
-
-from typing import Union, List, Optional, Callable, AsyncGenerator, TypeVar, Dict
+from typing import Union, List, Optional, Callable, AsyncGenerator, TypeVar, Dict, Awaitable
 
 __all__ = ['Twitch']
 T = TypeVar('T')
@@ -217,18 +213,6 @@ T = TypeVar('T')
 class Twitch:
     """
     Twitch API client
-
-    :param str app_id: Your app id
-    :param str app_secret: Your app secret, leave as None if you only want to use User Authentication
-            |default| :code:`None`
-    :param bool authenticate_app: If true, auto generate a app token on startup |default| :code:`True`
-    :param list[~twitchAPI.types.AuthScope] target_app_auth_scope: AuthScope to use if :code:`authenticate_app` is True
-            |default| :code:`None`
-    :var bool auto_refresh_auth: If set to true, auto refresh the auth token once it expires. |default| :code:`True`
-    :var Callable[[str,str],None] user_auth_refresh_callback: If set, gets called whenever a user auth token gets
-        refreshed. Parameter: Auth Token, Refresh Token |default| :code:`None`
-    :var Callable[[str,str],None] app_auth_refresh_callback: If set, gets called whenever a app auth token gets
-        refreshed. Parameter: Auth Token |default| :code:`None`
     """
 
     def __init__(self,
@@ -237,11 +221,20 @@ class Twitch:
                  authenticate_app: bool = True,
                  target_app_auth_scope: Optional[List[AuthScope]] = None,
                  base_url: str = TWITCH_API_BASE_URL):
+        """
+        :param app_id: Your app id
+        :param app_secret: Your app secret, leave as None if you only want to use User Authentication |default| :code:`None`
+        :param authenticate_app: If true, auto generate a app token on startup |default| :code:`True`
+        :param target_app_auth_scope: AuthScope to use if :code:`authenticate_app` is True |default| :code:`None`
+        :param base_url: The URL to the Twitch API |default| :const:`~twitchAPI.helper.TWITCH_API_BASE_URL`
+        """
         self.app_id: Optional[str] = app_id
         self.app_secret: Optional[str] = app_secret
         self.__logger: Logger = getLogger('twitchAPI.twitch')
-        self.user_auth_refresh_callback: Optional[Callable[[str, str], None]] = None
-        self.app_auth_refresh_callback: Optional[Callable[[str], None]] = None
+        self.user_auth_refresh_callback: Optional[Callable[[str, str], Awaitable[None]]] = None
+        """If set, gets called whenever a user auth token gets refreshed. Parameter: Auth Token, Refresh Token |default| :code:`None`"""
+        self.app_auth_refresh_callback: Optional[Callable[[str], Awaitable[None]]] = None
+        """If set, gets called whenever a app auth token gets refreshed. Parameter: Auth Token |default| :code:`None`"""
         self.__app_auth_token: Optional[str] = None
         self.__app_auth_scope: List[AuthScope] = []
         self.__has_app_auth: bool = False
@@ -251,9 +244,11 @@ class Twitch:
         self.__user_auth_scope: List[AuthScope] = []
         self.__has_user_auth: bool = False
         self.auto_refresh_auth: bool = True
+        """If set to true, auto refresh the auth token once it expires. |default| :code:`True`"""
         self._authenticate_app = authenticate_app
         self._target_app_scope = target_app_auth_scope
-        self.base_url = base_url
+        self.base_url: str = base_url
+        """The URL to the Twitch API used"""
 
     def __await__(self):
         if self._authenticate_app:
@@ -341,11 +336,11 @@ class Twitch:
                                                                                                 self.app_secret,
                                                                                                 self._session)
             if self.user_auth_refresh_callback is not None:
-                self.user_auth_refresh_callback(self.__user_auth_token, self.__user_auth_refresh_token)
+                await self.user_auth_refresh_callback(self.__user_auth_token, self.__user_auth_refresh_token)
         else:
             await self.__generate_app_token()
             if self.app_auth_refresh_callback is not None:
-                self.app_auth_refresh_callback(self.__app_auth_token)
+                await self.app_auth_refresh_callback(self.__app_auth_token)
 
     async def __check_request_return(self,
                                      response: ClientResponse,
@@ -507,8 +502,9 @@ class Twitch:
                 response = await req(_url, auth_type, auth_scope)
             else:
                 response = await req(_url, auth_type, auth_scope, data=body_data)
-            if response.status in error_handler.keys():
-                raise error_handler[response.status]
+            if error_handler is not None:
+                if response.status in error_handler.keys():
+                    raise error_handler[response.status]
             data = await response.json()
             for entry in data.get('data', []):
                 yield return_type(**entry)
@@ -1143,7 +1139,8 @@ class Twitch:
 
     async def get_games(self,
                         game_ids: Optional[List[str]] = None,
-                        names: Optional[List[str]] = None) -> AsyncGenerator[Game, None]:
+                        names: Optional[List[str]] = None,
+                        igdb_ids: Optional[List[str]] = None) -> AsyncGenerator[Game, None]:
         """Gets game information by game ID or name.\n\n
 
         Requires User or App authentication.
@@ -1153,19 +1150,23 @@ class Twitch:
 
         :param game_ids: Game ID |default| :code:`None`
         :param names: Game Name |default| :code:`None`
+        :param igdb_ids: IGDB ID |default| :code:`None`
         :raises ~twitchAPI.types.UnauthorizedException: if app authentication is not set or invalid
         :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
         :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
         :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
-        :raises ValueError: if neither game_ids nor names are given or if game_ids and names are more than 100 entries combined.
+        :raises ValueError: if none of game_ids, names or igdb_ids are given or if game_ids, names and igdb_ids are more than 100 entries combined.
         """
-        if game_ids is None and names is None:
-            raise ValueError('at least one of either game_ids and names has to be set')
-        if (len(game_ids) if game_ids is not None else 0) + (len(names) if names is not None else 0) > 100:
-            raise ValueError('in total, only 100 game_ids and names can be passed')
+        if game_ids is None and names is None and igdb_ids is None:
+            raise ValueError('at least one of game_ids, names or igdb_ids has to be set')
+        if (len(game_ids) if game_ids is not None else 0) + \
+                (len(names) if names is not None else 0) + \
+                (len(igdb_ids) if igdb_ids is not None else 0) > 100:
+            raise ValueError('in total, only 100 game_ids, names and igdb_ids can be passed')
         param = {
             'id': game_ids,
-            'name': names
+            'name': names,
+            'igdb_id': igdb_ids
         }
         async for y in self._build_generator('GET', 'games', param, AuthType.EITHER, [], Game, split_lists=True):
             yield y
@@ -3351,9 +3352,9 @@ class Twitch:
         For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-vips
 
         :param broadcaster_id: The ID of the broadcaster whose list of VIPs you want to get.
-        :param user_ids: Filters the list for specific VIPs. Maximum 100 |default|`None`
-        :param first: The maximum number of items to return per page in the response. Maximum 100 |default|`None`
-        :param after: The cursor used to get the next page of results. |default|`None`
+        :param user_ids: Filters the list for specific VIPs. Maximum 100 |default|:code:`None`
+        :param first: The maximum number of items to return per page in the response. Maximum 100 |default|:code:`None`
+        :param after: The cursor used to get the next page of results. |default|:code:`None`
         :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
         :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
         :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
@@ -3477,7 +3478,7 @@ class Twitch:
 
         :param broadcaster_id: The ID of the broadcaster that owns the chat room to remove messages from.
         :param moderator_id: The ID of a user that has permission to moderate the broadcaster’s chat room.
-        :param message_id: The ID of the message to remove. If None, removes all messages from the broadcasters chat. |default|`None`
+        :param message_id: The ID of the message to remove. If None, removes all messages from the broadcasters chat. |default|:code:`None`
         :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
         :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
         :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
@@ -3508,7 +3509,7 @@ class Twitch:
         :param broadcaster_id: The ID of the broadcaster that owns the chat room to send the announcement to.
         :param moderator_id: The ID of a user who has permission to moderate the broadcaster’s chat room.
         :param message: The announcement to make in the broadcaster’s chat room.
-        :param color: The color used to highlight the announcement. See twitch Docs for valid values. |default|`None`
+        :param color: The color used to highlight the announcement. See twitch Docs for valid values. |default|:code:`None`
         :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
         :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
         :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
@@ -3528,3 +3529,79 @@ class Twitch:
         error = {403: ForbiddenError('moderator_id is not a moderator of broadcaster_id')}
         await self._build_result('POST', 'chat/announcements', param, AuthType.USER, [AuthScope.MODERATOR_MANAGE_ANNOUNCEMENTS], None,
                                  body_data=body, error_handler=error)
+
+    async def get_soundtrack_current_track(self, broadcaster_id: str) -> CurrentSoundtrack:
+        """Gets the Soundtrack track that the broadcaster is playing.
+
+        Requires User or App Authentication\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-soundtrack-current-track
+
+        :param broadcaster_id: The ID of the broadcaster that’s playing a Soundtrack track.
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
+        """
+        param = {
+            'broadcaster_id': broadcaster_id
+        }
+        return await self._build_result('GET', 'soundtrack/current_track', param, AuthType.EITHER, [], CurrentSoundtrack)
+
+    async def get_soundtrack_playlist(self,
+                                      broadcaster_id: str,
+                                      first: Optional[int] = None,
+                                      after: Optional[str] = None) -> AsyncGenerator[Soundtrack, None]:
+        """Gets the Soundtrack playlist’s tracks.
+
+        Requires User or App Authentication\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-soundtrack-playlist
+
+        :param broadcaster_id: The ID of the playlist to get.
+        :param first: The maximum number of items to return per page in the response. Between 1 and 50. |default| :code:`20`
+        :param after: The cursor used to get the next page of results.
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
+        :raises ValueError: if first is not between 1 and 50
+        """
+        if first is not None and first < 1 or first > 50:
+            raise ValueError('first must be between 1 and 50')
+        param = {
+            'broadcaster_id': broadcaster_id,
+            'first': first,
+            'after': after
+        }
+        async for y in self._build_generator('GET', 'soundtrack/playlist', param, AuthType.EITHER, [], Soundtrack):
+            yield y
+
+    async def get_soundtrack_playlists(self,
+                                       playlist_id: Optional[str] = None,
+                                       first: Optional[int] = None,
+                                       after: Optional[str] = None) -> AsyncGenerator[Playlist, None]:
+        """Gets a list of Soundtrack playlists.
+
+        Requires User or App Authentication\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-soundtrack-playlists
+
+        :param playlist_id: The ID of the playlist to get. Specify an ID only if you want to get a single playlist instead of all playlists.
+        :param first: The maximum number of items to return per page in the response. Between 1 and 50. |default| :code:`20`
+        :param after: The cursor used to get the next page of results.
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
+        :raises ValueError: if first is not between 1 and 50
+        """
+        if first is not None and first < 1 or first > 50:
+            raise ValueError('first must be between 1 and 50')
+        param = {
+            'id': playlist_id,
+            'first': first,
+            'after': after
+        }
+        async for y in self._build_generator('GET', 'soundtrack/playlists', param, AuthType.EITHER, [], Playlist):
+            yield y

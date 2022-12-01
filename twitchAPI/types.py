@@ -1,5 +1,7 @@
 #  Copyright (c) 2020. Lena "Teekeks" During <info@teawork.de>
-"""Type Definitions"""
+"""
+Type Definitions
+----------------"""
 from dataclasses import dataclass
 from enum import Enum
 from typing_extensions import TypedDict
@@ -107,6 +109,7 @@ class HypeTrainContributionMethod(Enum):
 
     BITS = 'BITS'
     SUBS = 'SUBS'
+    OTHER = 'OTHER'
     UNKNOWN = ''
 
 
@@ -231,8 +234,12 @@ class AutoModCheckEntry(TypedDict):
     """Developer-generated identifier for mapping messages to results."""
     msg_text: str
     """Message text"""
-    user_id: str
-    """User ID of the sender"""
+
+
+class SoundtrackSourceType(Enum):
+    """"""
+    PLAYLIST = 'PLAYLIST'
+    STATION = 'STATION'
 
 
 # CHAT
@@ -252,6 +259,8 @@ class ChatEvent(Enum):
     """Triggered when someone other than the bot joins a chat channel"""
     JOINED = 'joined'
     """Triggered when the bot joins a chat channel"""
+    LEFT = 'left'
+    """Triggered when the bot leaves a chat channel"""
 
 
 @dataclass

@@ -1,8 +1,9 @@
 enum_tools
 sphinx_toolbox
-requests
 aiohttp
 python-dateutil
-websockets
+sphinx
+pygments
 typing_extensions
 sphinx-autodoc-typehints
+pydata-sphinx-theme

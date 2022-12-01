@@ -1,29 +1,31 @@
 #  Copyright (c) 2020. Lena "Teekeks" During <info@teawork.de>
-"""Helper functions"""
+"""
+Helper functions
+----------------"""
 
 import urllib.parse
 import uuid
 from typing import AsyncGenerator, TypeVar
-from json import JSONDecodeError
-from aiohttp.web import Request
-from dateutil import parser as du_parser
 from enum import Enum
 
 from .types import AuthScope
-from urllib.parse import urlparse, parse_qs
 
 from typing import Union, List, Type, Optional
 
 __all__ = ['TWITCH_API_BASE_URL', 'TWITCH_AUTH_BASE_URL', 'TWITCH_PUB_SUB_URL', 'TWITCH_CHAT_URL',
-           'build_url', 'get_uuid', 'get_json', 'build_scope', 'fields_to_enum', 'make_enum',
+           'build_url', 'get_uuid', 'build_scope', 'fields_to_enum', 'make_enum',
            'enum_value_or_none', 'datetime_to_str', 'remove_none_values', 'ResultType', 'first']
 
 T = TypeVar('T')
 
 TWITCH_API_BASE_URL = "https://api.twitch.tv/helix/"
+"""The base url to the Twitch API endpoints"""
 TWITCH_AUTH_BASE_URL = "https://id.twitch.tv/"
+"""The base url to the twitch authentication endpoints"""
 TWITCH_PUB_SUB_URL = "wss://pubsub-edge.twitch.tv"
+"""The url to the Twitch PubSub websocket"""
 TWITCH_CHAT_URL = "wss://irc-ws.chat.twitch.tv:443"
+"""The url to the Twitch Chat websocket"""
 
 
 class ResultType(Enum):
@@ -77,21 +79,6 @@ def get_uuid():
 
     :rtype: :class:`~uuid.UUID`"""
     return uuid.uuid4()
-
-
-async def get_json(request: 'Request') -> Union[list, dict, None]:
-    """Tries to retrieve the json object from the body
-
-    :param request: the request
-    :return: the object in the body or None
-    """
-    if not request.can_read_body:
-        return None
-    try:
-        data = await request.json()
-        return data
-    except JSONDecodeError:
-        return None
 
 
 def build_scope(scopes: List[AuthScope]) -> str:
@@ -170,8 +157,11 @@ def remove_none_values(d: dict) -> dict:
     return {k: v for k, v in d.items() if v is not None}
 
 
-async def first(gen: AsyncGenerator[T, None]) -> T:
+async def first(gen: AsyncGenerator[T, None]) -> Optional[T]:
     """Returns the first value of the given AsyncGenerator
 
     :param ~typing.AsyncGenerator gen: The generator from which you want the first value"""
-    return await gen.__anext__()
+    try:
+        return await gen.__anext__()
+    except StopAsyncIteration:
+        return None

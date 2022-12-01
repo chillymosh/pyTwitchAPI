@@ -1,6 +1,6 @@
 #  Copyright (c) 2020. Lena "Teekeks" During <info@teawork.de>
 """
-PubSub client
+PubSub Client
 -------------
 
 This is a full implementation of the PubSub API of twitch.
@@ -10,49 +10,67 @@ Read more about it on `the Twitch API Documentation <https://dev.twitch.tv/docs/
 
 .. note:: You **always** need User Authentication while using this!
 
-*******************
-Short code example:
-*******************
+************
+Code Example
+************
 
 .. code-block:: python
 
     from twitchAPI.pubsub import PubSub
     from twitchAPI.twitch import Twitch
+    from twitchAPI.helper import first
     from twitchAPI.types import AuthScope
+    from twitchAPI.oauth import UserAuthenticator
+    import asyncio
     from pprint import pprint
     from uuid import UUID
 
-    def callback_whisper(uuid: UUID, data: dict) -> None:
+    APP_ID = 'my_app_id'
+    APP_SECRET = 'my_app_secret'
+    USER_SCOPE = [AuthScope.WHISPERS_READ]
+    TARGET_CHANNEL = 'teekeks42'
+
+    async def callback_whisper(uuid: UUID, data: dict) -> None:
         print('got callback for UUID ' + str(uuid))
         pprint(data)
 
-    # setting up Authentication and getting your user id
-    twitch = Twitch('my_app_id', 'my_app_secret')
-    twitch.authenticate_app([])
-    # you can get your user auth token and user auth refresh token following the example in twitchAPI.oauth
-    twitch.set_user_authentication('my_user_auth_token', [AuthScope.WHISPERS_READ], 'my_user_auth_refresh_token')
-    user_id = twitch.get_users(logins=['my_username'])['data'][0]['id']
 
-    # starting up PubSub
-    pubsub = PubSub(twitch)
-    pubsub.start()
-    # you can either start listening before or after you started pubsub.
-    uuid = pubsub.listen_whispers(user_id, callback_whisper)
-    input('press ENTER to close...')
-    # you do not need to unlisten to topics before stopping but you can listen and unlisten at any moment you want
-    pubsub.unlisten(uuid)
-    pubsub.stop()
+    async def run_example():
+        # setting up Authentication and getting your user id
+        twitch = await Twitch(APP_ID, APP_SECRET)
+        auth = UserAuthenticator(twitch, [AuthScope.WHISPERS_READ], force_verify=False)
+        token, refresh_token = await auth.authenticate()
+        # you can get your user auth token and user auth refresh token following the example in twitchAPI.oauth
+        await twitch.set_user_authentication(token, [AuthScope.WHISPERS_READ], refresh_token)
+        user = await first(twitch.get_users(logins=[TARGET_CHANNEL]))
 
-********************
-Class Documentation:
-********************
+        # starting up PubSub
+        pubsub = PubSub(twitch)
+        pubsub.start()
+        # you can either start listening before or after you started pubsub.
+        uuid = await pubsub.listen_whispers(user.id, callback_whisper)
+        input('press ENTER to close...')
+        # you do not need to unlisten to topics before stopping but you can listen and unlisten at any moment you want
+        await pubsub.unlisten(uuid)
+        pubsub.stop()
+        await twitch.close()
+
+    asyncio.run(run_example())
+
+
+*******************
+Class Documentation
+*******************
 """
+from asyncio import CancelledError
+
+import aiohttp
+from aiohttp import ClientSession
 
 from .twitch import Twitch
 from .types import *
 from .helper import get_uuid, make_enum, TWITCH_PUB_SUB_URL
 import asyncio
-import websockets
 import threading
 import json
 from random import randrange
@@ -61,42 +79,41 @@ from logging import getLogger, Logger
 from uuid import UUID
 from time import sleep
 
-from typing import Callable, List, Dict
+from typing import Callable, List, Dict, Awaitable
 
 __all__ = ['PubSub']
 
 
 class PubSub:
     """The PubSub client
-
-    :var int ping_frequency: with which frequency in seconds a ping command is send.
-                                You probably don't want to change this.
-                                This should never be shorter than 12 + `ping_jitter` seconds to avoid problems
-                                with the pong timeout.
-                                |default| :code:`120`
-    :var int ping_jitter: time in seconds added or subtracted from `ping_frequency`.
-                             You probably don't want to change this.
-                             |default| :code:`4`
-    :var int listen_confirm_timeout: maximum time in seconds waited for a listen confirm.
-                                        |default| :code:`30`
     """
 
     def __init__(self, twitch: Twitch):
+        """
+
+        :param twitch:  A authenticated Twitch instance
+        """
         self.__twitch: Twitch = twitch
         self.__logger: Logger = getLogger('twitchAPI.pubsub')
         self.ping_frequency: int = 120
+        """With which frequency in seconds a ping command is send. You probably don't want to change this. 
+           This should never be shorter than 12 + `ping_jitter` seconds to avoid problems with the pong timeout. |default| :code:`120`"""
         self.ping_jitter: int = 4
+        """time in seconds added or subtracted from `ping_frequency`. You probably don't want to change this. |default| :code:`4`"""
         self.listen_confirm_timeout: int = 30
+        """maximum time in seconds waited for a listen confirm. |default| :code:`30`"""
         self.reconnect_delay_steps: List[int] = [1, 2, 4, 8, 16, 32, 64, 128]
         self.__connection = None
         self.__socket_thread: threading.Thread = None
         self.__running: bool = False
         self.__socket_loop = None
         self.__topics: dict = {}
+        self._session = None
         self.__startup_complete: bool = False
         self.__tasks = None
         self.__waiting_for_pong: bool = False
         self.__nonce_waiting_confirm: dict = {}
+        self._closing = False
 
     def start(self) -> None:
         """
@@ -115,6 +132,14 @@ class PubSub:
             sleep(0.01)
         self.__logger.debug('pubsub started up!')
 
+    async def _stop(self):
+        for t in self.__tasks:
+            t.cancel()
+        await self.__connection.close()
+        await self._session.close()
+        await asyncio.sleep(0.25)
+        self._closing = True
+
     def stop(self) -> None:
         """
         Stop the PubSub Client
@@ -127,9 +152,8 @@ class PubSub:
         self.__logger.debug('stopping pubsub...')
         self.__startup_complete = False
         self.__running = False
-        for task in self.__tasks:
-            task.cancel()
-        self.__socket_loop.call_soon_threadsafe(self.__socket_loop.stop)
+        f = asyncio.run_coroutine_threadsafe(self._stop(), self.__socket_loop)
+        f.result()
         self.__logger.debug('pubsub stopped!')
         self.__socket_thread.join()
 
@@ -139,15 +163,18 @@ class PubSub:
 
     async def __connect(self, is_startup=False):
         self.__logger.debug('connecting...')
+        self._closing = False
         if self.__connection is not None and self.__connection.open:
             await self.__connection.close()
         retry = 0
         need_retry = True
+        if self._session is None:
+            self._session = ClientSession()
         while need_retry and retry < len(self.reconnect_delay_steps):
             need_retry = False
             try:
-                self.__connection = await websockets.connect(TWITCH_PUB_SUB_URL, loop=self.__socket_loop)
-            except websockets.InvalidHandshake:
+                self.__connection = await self._session.ws_connect(TWITCH_PUB_SUB_URL)
+            except Exception:
                 self.__logger.warning(f'connection attempt failed, retry in {self.reconnect_delay_steps[retry]}s...')
                 await asyncio.sleep(self.reconnect_delay_steps[retry])
                 retry += 1
@@ -155,7 +182,7 @@ class PubSub:
         if retry >= len(self.reconnect_delay_steps):
             raise TwitchBackendException('cant connect')
 
-        if self.__connection.open and not is_startup:
+        if not self.__connection.closed and not is_startup:
             uuid = str(get_uuid())
             await self.__send_listen(uuid, list(self.__topics.keys()))
 
@@ -190,7 +217,12 @@ class PubSub:
                 raise TwitchAPIException(error)
 
     async def __send_message(self, msg_data):
-        await self.__connection.send(json.dumps(msg_data))
+        self.__logger.debug(f'sending message {json.dumps(msg_data)}')
+        await self.__connection.send_str(json.dumps(msg_data))
+
+    async def _keep_loop_alive(self):
+        while not self._closing:
+            await asyncio.sleep(0.1)
 
     def __run_socket(self):
         self.__socket_loop = asyncio.new_event_loop()
@@ -205,14 +237,9 @@ class PubSub:
             asyncio.ensure_future(self.__task_initial_listen(), loop=self.__socket_loop)
         ]
 
-        try:
-            self.__socket_loop.run_forever()
-        except asyncio.CancelledError:
-            pass
-        if self.__connection.open:
-            self.__socket_loop.run_until_complete(self.__connection.close())
+        self.__socket_loop.run_until_complete(self._keep_loop_alive())
 
-    def __generic_listen(self, key, callback_func, required_scopes: List[AuthScope]) -> UUID:
+    async def __generic_listen(self, key, callback_func, required_scopes: List[AuthScope]) -> UUID:
         for scope in required_scopes:
             if scope not in self.__twitch.get_user_auth_scope():
                 raise MissingScopeException(str(scope))
@@ -221,7 +248,7 @@ class PubSub:
             self.__topics[key] = {'subs': {}}
         self.__topics[key]['subs'][uuid] = callback_func
         if self.__startup_complete:
-            asyncio.get_event_loop().run_until_complete(self.__send_listen(str(uuid), [key]))
+            await self.__send_listen(str(uuid), [key])
         return uuid
 
 ###########################################################################################
@@ -235,7 +262,7 @@ class PubSub:
             await self.__send_listen(uuid, list(self.__topics.keys()))
 
     async def __task_heartbeat(self):
-        while True:
+        while not self._closing:
             next_heartbeat = datetime.datetime.utcnow() + \
                              datetime.timedelta(seconds=randrange(self.ping_frequency - self.ping_jitter,
                                                                   self.ping_frequency + self.ping_jitter,
@@ -255,17 +282,33 @@ class PubSub:
                 await asyncio.sleep(1)
 
     async def __task_receive(self):
-        async for message in self.__connection:
-            data = json.loads(message)
-            switcher: Dict[str, Callable] = {
-                'pong': self.__handle_pong,
-                'reconnect': self.__handle_reconnect,
-                'response': self.__handle_response,
-                'message': self.__handle_message
-            }
-            handler = switcher.get(data.get('type', '').lower(),
-                                   self.__handle_unknown)
-            self.__socket_loop.create_task(handler(data))
+        try:
+            while not self.__connection.closed:
+                message = await self.__connection.receive()
+                if message.type == aiohttp.WSMsgType.TEXT:
+                    messages = message.data.split('\r\n')
+                    for m in messages:
+                        if len(m) == 0:
+                            continue
+                        self.__logger.debug(f'received message {m}')
+                        data = json.loads(m)
+                        switcher: Dict[str, Callable] = {
+                            'pong': self.__handle_pong,
+                            'reconnect': self.__handle_reconnect,
+                            'response': self.__handle_response,
+                            'message': self.__handle_message
+                        }
+                        handler = switcher.get(data.get('type', '').lower(),
+                                               self.__handle_unknown)
+                        self.__socket_loop.create_task(handler(data))
+                elif message.type == aiohttp.WSMsgType.CLOSED:
+                    self.__logger.debug('websocket is closing')
+                    break
+                elif message.type == aiohttp.WSMsgType.ERROR:
+                    self.__logger.warning('error in websocket')
+                    break
+        except CancelledError:
+            return
 
 ###########################################################################################
 # Handler
@@ -292,7 +335,7 @@ class PubSub:
         msg_data = json.loads(data.get('data', {}).get('message', '{}'))
         if topic_data is not None:
             for uuid, sub in topic_data.get('subs', {}).items():
-                sub(uuid, msg_data)
+                asyncio.ensure_future(sub(uuid, msg_data))
 
     async def __handle_unknown(self, data):
         self.__logger.warning('got message of unknown type: ' + str(data))
@@ -301,7 +344,7 @@ class PubSub:
 # Listener
 ###########################################################################################
 
-    def unlisten(self, uuid: UUID) -> None:
+    async def unlisten(self, uuid: UUID) -> None:
         """
         Stop listening to a specific Topic subscription.
 
@@ -319,14 +362,14 @@ class PubSub:
                 if len(topic_data['subs'].keys()) == 0:
                     clear_topics.append(topic)
         if self.__startup_complete and len(clear_topics) > 0:
-            asyncio.get_event_loop().run_until_complete(self.__send_listen(str(uuid), clear_topics, subscribe=False))
+            await self.__send_listen(str(uuid), clear_topics, subscribe=False)
         if len(clear_topics) > 0:
             for topic in clear_topics:
                 self.__topics.pop(topic)
 
-    def listen_whispers(self,
-                        user_id: str,
-                        callback_func: Callable[[UUID, dict], None]) -> UUID:
+    async def listen_whispers(self,
+                              user_id: str,
+                              callback_func: Callable[[UUID, dict], Awaitable[None]]) -> UUID:
         """
         You are notified when anyone whispers the specified user or the specified user whispers to anyone.\n
         Requires the :const:`~twitchAPI.types.AuthScope.WHISPERS_READ` AuthScope.\n
@@ -340,11 +383,11 @@ class PubSub:
         :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
-        return self.__generic_listen(f'whispers.{user_id}', callback_func, [AuthScope.WHISPERS_READ])
+        return await self.__generic_listen(f'whispers.{user_id}', callback_func, [AuthScope.WHISPERS_READ])
 
-    def listen_bits_v1(self,
-                       channel_id: str,
-                       callback_func: Callable[[UUID, dict], None]) -> UUID:
+    async def listen_bits_v1(self,
+                             channel_id: str,
+                             callback_func: Callable[[UUID, dict], Awaitable[None]]) -> UUID:
         """
         You are notified when anyone cheers in the specified channel.\n
         Requires the :const:`~twitchAPI.types.AuthScope.BITS_READ` AuthScope.\n
@@ -358,11 +401,11 @@ class PubSub:
         :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
-        return self.__generic_listen(f'channel-bits-events-v1.{channel_id}', callback_func, [AuthScope.BITS_READ])
+        return await self.__generic_listen(f'channel-bits-events-v1.{channel_id}', callback_func, [AuthScope.BITS_READ])
 
-    def listen_bits(self,
-                    channel_id: str,
-                    callback_func: Callable[[UUID, dict], None]) -> UUID:
+    async def listen_bits(self,
+                          channel_id: str,
+                          callback_func: Callable[[UUID, dict], None]) -> UUID:
         """
         You are notified when anyone cheers in the specified channel.\n
         Requires the :const:`~twitchAPI.types.AuthScope.BITS_READ` AuthScope.\n
@@ -376,11 +419,11 @@ class PubSub:
         :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
-        return self.__generic_listen(f'channel-bits-events-v2.{channel_id}', callback_func, [AuthScope.BITS_READ])
+        return await self.__generic_listen(f'channel-bits-events-v2.{channel_id}', callback_func, [AuthScope.BITS_READ])
 
-    def listen_bits_badge_notification(self,
-                                       channel_id: str,
-                                       callback_func: Callable[[UUID, dict], None]) -> UUID:
+    async def listen_bits_badge_notification(self,
+                                             channel_id: str,
+                                             callback_func: Callable[[UUID, dict], Awaitable[None]]) -> UUID:
         """
         You are notified when a user earns a new Bits badge in the given channel,
         and chooses to share the notification with chat.\n
@@ -395,11 +438,11 @@ class PubSub:
         :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
-        return self.__generic_listen(f'channel-bits-badge-unlocks.{channel_id}', callback_func, [AuthScope.BITS_READ])
+        return await self.__generic_listen(f'channel-bits-badge-unlocks.{channel_id}', callback_func, [AuthScope.BITS_READ])
 
-    def listen_channel_points(self,
-                              channel_id: str,
-                              callback_func: Callable[[UUID, dict], None]) -> UUID:
+    async def listen_channel_points(self,
+                                    channel_id: str,
+                                    callback_func: Callable[[UUID, dict], Awaitable[None]]) -> UUID:
         """
         You are notified when a custom reward is redeemed in the channel.\n
         Requires the :const:`~twitchAPI.types.AuthScope.CHANNEL_READ_REDEMPTIONS` AuthScope.\n
@@ -413,13 +456,13 @@ class PubSub:
         :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
-        return self.__generic_listen(f'channel-points-channel-v1.{channel_id}',
-                                     callback_func,
-                                     [AuthScope.CHANNEL_READ_REDEMPTIONS])
+        return await self.__generic_listen(f'channel-points-channel-v1.{channel_id}',
+                                           callback_func,
+                                           [AuthScope.CHANNEL_READ_REDEMPTIONS])
 
-    def listen_channel_subscriptions(self,
-                                     channel_id: str,
-                                     callback_func: Callable[[UUID, dict], None]) -> UUID:
+    async def listen_channel_subscriptions(self,
+                                           channel_id: str,
+                                           callback_func: Callable[[UUID, dict], Awaitable[None]]) -> UUID:
         """
         You are notified when anyone subscribes (first month), resubscribes (subsequent months),
         or gifts a subscription to a channel. Subgift subscription messages contain recipient information.\n
@@ -434,14 +477,14 @@ class PubSub:
         :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
-        return self.__generic_listen(f'channel-subscribe-events-v1.{channel_id}',
-                                     callback_func,
-                                     [AuthScope.CHANNEL_READ_SUBSCRIPTIONS])
+        return await self.__generic_listen(f'channel-subscribe-events-v1.{channel_id}',
+                                           callback_func,
+                                           [AuthScope.CHANNEL_READ_SUBSCRIPTIONS])
 
-    def listen_chat_moderator_actions(self,
-                                      user_id: str,
-                                      channel_id: str,
-                                      callback_func: Callable[[UUID, dict], None]) -> UUID:
+    async def listen_chat_moderator_actions(self,
+                                            user_id: str,
+                                            channel_id: str,
+                                            callback_func: Callable[[UUID, dict], Awaitable[None]]) -> UUID:
         """
         Supports moderators listening to the topic, as well as users listening to the topic to receive their own events.
         Examples of moderator actions are bans, unbans, timeouts, deleting messages,
@@ -458,14 +501,14 @@ class PubSub:
         :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
-        return self.__generic_listen(f'chat_moderator_actions.{user_id}.{channel_id}',
-                                     callback_func,
-                                     [AuthScope.CHANNEL_MODERATE])
+        return await self.__generic_listen(f'chat_moderator_actions.{user_id}.{channel_id}',
+                                           callback_func,
+                                           [AuthScope.CHANNEL_MODERATE])
 
-    def listen_automod_queue(self,
-                             moderator_id: str,
-                             channel_id: str,
-                             callback_func: Callable[[UUID, dict], None]) -> UUID:
+    async def listen_automod_queue(self,
+                                   moderator_id: str,
+                                   channel_id: str,
+                                   callback_func: Callable[[UUID, dict], Awaitable[None]]) -> UUID:
         """
         AutoMod flags a message as potentially inappropriate, and when a moderator takes action on a message.\n
         Requires the :const:`~twitchAPI.types.AuthScope.CHANNEL_MODERATE` AuthScope.\n
@@ -480,14 +523,14 @@ class PubSub:
         :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
-        return self.__generic_listen(f'automod-queue.{moderator_id}.{channel_id}',
-                                     callback_func,
-                                     [AuthScope.CHANNEL_MODERATE])
+        return await self.__generic_listen(f'automod-queue.{moderator_id}.{channel_id}',
+                                           callback_func,
+                                           [AuthScope.CHANNEL_MODERATE])
 
-    def listen_user_moderation_notifications(self,
-                                             user_id: str,
-                                             channel_id: str,
-                                             callback_func: Callable[[UUID, dict], None]) -> UUID:
+    async def listen_user_moderation_notifications(self,
+                                                   user_id: str,
+                                                   channel_id: str,
+                                                   callback_func: Callable[[UUID, dict], Awaitable[None]]) -> UUID:
         """
         A user’s message held by AutoMod has been approved or denied.\n
         Requires the :const:`~twitchAPI.types.AuthScope.CHAT_READ` AuthScope.\n
@@ -502,13 +545,13 @@ class PubSub:
         :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         :raises ~twitchAPI.types.MissingScopeException: if required AuthScope is missing from Token
         """
-        return self.__generic_listen(f'user-moderation-notifications.{user_id}.{channel_id}',
-                                     callback_func,
-                                     [AuthScope.CHAT_READ])
+        return await self.__generic_listen(f'user-moderation-notifications.{user_id}.{channel_id}',
+                                           callback_func,
+                                           [AuthScope.CHAT_READ])
 
-    def listen_undocumented_topic(self,
-                                  topic: str,
-                                  callback_func: Callable[[UUID, dict], None]) -> UUID:
+    async def listen_undocumented_topic(self,
+                                        topic: str,
+                                        callback_func: Callable[[UUID, dict], Awaitable[None]]) -> UUID:
         """
         Listen to one of the many undocumented PubSub topics.
 
@@ -524,4 +567,4 @@ class PubSub:
         :raises ~twitchAPI.types.PubSubListenTimeoutException: if the subscription is not confirmed in the time set by `listen_confirm_timeout`
         """
         self.__logger.warning(f"using undocumented topic {topic}")
-        return self.__generic_listen(topic, callback_func, [])
+        return await self.__generic_listen(topic, callback_func, [])

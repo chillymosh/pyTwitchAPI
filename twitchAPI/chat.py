@@ -1,4 +1,121 @@
 #  Copyright (c) 2022. Lena "Teekeks" During <info@teawork.de>
+"""
+Twitch Chat Bot
+---------------
+
+A simple twitch chat bot.\n
+Chat bots can join channels, listen to chat and reply to messages, commands, subscriptions and many more.
+
+.. warning::
+    Please note that the Chat Bot is currently in a **early alpha** stage!\n
+    Bugs and oddities are to be expected.\n
+    Please report all feature requests and bug requests to the `github page <https://github.com/Teekeks/pyTwitchAPI/issues>`_.
+
+
+************
+Code example
+************
+
+.. code-block:: python
+
+    from twitchAPI import Twitch
+    from twitchAPI.oauth import UserAuthenticator
+    from twitchAPI.types import AuthScope, ChatEvent
+    from twitchAPI.chat import Chat, EventData, ChatMessage, ChatSub, ChatCommand
+    import asyncio
+
+    APP_ID = 'my_app_id'
+    APP_SECRET = 'my_app_secret'
+    USER_SCOPE = [AuthScope.CHAT_READ, AuthScope.CHAT_EDIT]
+    TARGET_CHANNEL = 'teekeks42'
+
+
+    # this will be called when the event READY is triggered, which will be on bot start
+    async def on_ready(ready_event: EventData):
+        print('Bot is ready for work, joining channels')
+        # join our target channel, if you want to join multiple, either call join for each individually
+        # or even better pass a list of channels as the argument
+        await ready_event.chat.join_room(TARGET_CHANNEL)
+        # you can do other bot initialization things in here
+
+
+    # this will be called whenever a message in a channel was send by either the bot OR another user
+    async def on_message(msg: ChatMessage):
+        print(f'in {msg.room.name}, {msg.user.name} said: {msg.text}')
+
+
+    # this will be called whenever someone subscribes to a channel
+    async def on_sub(sub: ChatSub):
+        print(f'New subscription in {sub.room.name}:\\n'
+              f'  Type: {sub.sub_plan}\\n'
+              f'  Message: {sub.sub_message}')
+
+
+    # this will be called whenever the !reply command is issued
+    async def test_command(cmd: ChatCommand):
+        if len(cmd.parameter) == 0:
+            await cmd.reply('you did not tell me what to reply with')
+        else:
+            await cmd.reply(f'{cmd.user.name}: {cmd.parameter}')
+
+
+    # this is where we set up the bot
+    async def run():
+        # set up twitch api instance and add user authentication with some scopes
+        twitch = await Twitch(APP_ID, APP_SECRET)
+        auth = UserAuthenticator(twitch, USER_SCOPE)
+        token, refresh_token = await auth.authenticate()
+        await twitch.set_user_authentication(token, USER_SCOPE, refresh_token)
+
+        # create chat instance
+        chat = await Chat(twitch)
+
+        # register the handlers for the events you want
+
+        # listen to when the bot is done starting up and ready to join channels
+        chat.register_event(ChatEvent.READY, on_ready)
+        # listen to chat messages
+        chat.register_event(ChatEvent.MESSAGE, on_message)
+        # listen to channel subscriptions
+        chat.register_event(ChatEvent.SUB, on_sub)
+        # there are more events, you can view them all in this documentation
+
+        # you can directly register commands and their handlers, this will register the !reply command
+        chat.register_command('reply', test_command)
+
+
+        # we are done with our setup, lets start this bot up!
+        chat.start()
+
+        # lets run till we press enter in the console
+        try:
+            input('press ENTER to stop\\n')
+        finally:
+            # now we can close the chat bot and the twitch api client
+            chat.stop()
+            await twitch.close()
+
+
+    # lets run our setup
+    asyncio.run(run())
+
+****************
+Available Events
+****************
+
+- :const:`~twitchAPI.types.ChatEvent.READY`: Triggered when the bot is stared up and ready to join channels
+- :const:`~twitchAPI.types.ChatEvent.MESSAGE`: Triggered when someone wrote a message in a channel we joined
+- :const:`~twitchAPI.types.ChatEvent.SUB`: Triggered when someone subscribed to a channel we joined
+- :const:`~twitchAPI.types.ChatEvent.RAID`: Triggered when a channel gets raided
+- :const:`~twitchAPI.types.ChatEvent.ROOM_STATE_CHANGE`: Triggered when a channel is changed (e.g. sub only mode was enabled)
+- :const:`~twitchAPI.types.ChatEvent.JOIN`: Triggered when someone other than the bot joins a channel. Note: this will not always trigger, depending on channel size
+- :const:`~twitchAPI.types.ChatEvent.JOINED`: Triggered when the bot joins a channel
+- :const:`~twitchAPI.types.ChatEvent.LEFT`: triggered when the bot left a channel
+
+*******************
+Class Documentation
+*******************
+"""
 import asyncio
 import dataclasses
 import threading
@@ -6,123 +123,187 @@ from asyncio import CancelledError
 from logging import getLogger, Logger
 from time import sleep
 import aiohttp
-from twitchAPI import TwitchBackendException, Twitch, AuthType, AuthScope, ChatEvent, MissingScopeException, UnauthorizedException
+from twitchAPI.twitch import Twitch
 from twitchAPI.object import TwitchUser
 from twitchAPI.helper import TWITCH_CHAT_URL, first
-from twitchAPI.types import ChatRoom
+from twitchAPI.types import ChatRoom, TwitchBackendException, AuthType, AuthScope, ChatEvent, MissingScopeException, UnauthorizedException
 
 from typing import List, Optional, Union, Callable, Dict
 
-__all__ = ['ChatUser', 'ChatMessage', 'ChatCommand', 'ChatSub', 'Chat', 'ChatRoom', 'ChatEvent', 'RoomStateChangeEvent']
+__all__ = ['ChatUser', 'EventData', 'ChatMessage', 'ChatCommand', 'ChatSub', 'Chat', 'ChatRoom', 'ChatEvent', 'RoomStateChangeEvent']
 
 
 class ChatUser:
+    """Represents a user in a chat channel
+    """
 
     def __init__(self, chat, parsed):
         self.chat: 'Chat' = chat
+        """The :const:`twitchAPI.chat.Chat` instance"""
         self.name: str = parsed['source']['nick'] if parsed['source']['nick'] is not None else f'{chat.username}'
+        """The name of the user"""
         if self.name[0] == ':':
             self.name = self.name[1:]
         self.badge_info = parsed['tags'].get('badge-info')
+        """All infos related to the badges of the user"""
         self.badges = parsed['tags'].get('badges')
-        self.bits: int = int(parsed['tags'].get('bits', '0'))
+        """The badges of the user"""
         self.color: str = parsed['tags'].get('color')
+        """The color of the chat user if set"""
         self.display_name: str = parsed['tags'].get('display-name')
+        """The display name, should usually be the same as name"""
         self.mod: bool = parsed['tags'].get('mod', '0') == '1'
-        self.reply_parent_msg_id: Optional[str] = parsed['tags'].get('reply-parent-msg-id')
-        self.reply_parent_user_id: Optional[str] = parsed['tags'].get('reply-parent-user-id')
-        self.reply_parent_display_name: Optional[str] = parsed['tags'].get('reply-parent-display-name')
-        self.reply_parent_msg_body: Optional[str] = parsed['tags'].get('reply-parent-msg-body')
+        """if the user is a mod in chat channel"""
         self.subscriber: bool = parsed['tags'].get('subscriber') == '1'
+        """if the user is a subscriber to the channel"""
         self.turbo: bool = parsed['tags'].get('turbo') == '1'
+        """Indicates whether the user has site-wide commercial free mode enabled"""
         self.id: str = parsed['tags'].get('user-id')
+        """The ID of the user"""
         self.user_type: str = parsed['tags'].get('user-type')
+        """The type of user"""
+        self.vip: bool = parsed['tags'].get('vip') == '1'
+        """if the chatter is a channel VIP"""
 
 
 class EventData:
+    """Represents a basic chat event
+
+    :param ~twitchAPI.chat.Chat chat: represents the Chat Instance"""
     def __init__(self, chat):
         self.chat: 'Chat' = chat
+        """The :const:`twitchAPI.chat.Chat` instance"""
 
 
 class RoomStateChangeEvent(EventData):
+    """Triggered when a room state changed"""
 
     def __init__(self, chat, prev, new):
         super(RoomStateChangeEvent, self).__init__(chat)
         self.old: Optional[ChatRoom] = prev
+        """The State of the room from before the change, might be Null if not in cache"""
         self.new: ChatRoom = new
+        """The new room state"""
 
     @property
     def room(self):
+        """Returns the Room from cache"""
         return self.chat.room_cache.get(self.new.name)
 
 
 class JoinEvent(EventData):
-
+    """"""
     def __init__(self, chat, channel_name, user_name):
         super(JoinEvent, self).__init__(chat)
         self._name = channel_name
         self.user_name: str = user_name
+        """The name of the user that joined"""
 
     @property
     def room(self):
+        """The room the user joined to"""
         return self.chat.room_cache.get(self._name)
 
 
 class JoinedEvent(EventData):
+    """"""
 
     def __init__(self, chat, channel_name, user_name):
         super(JoinedEvent, self).__init__(chat)
-        self.room_name = channel_name
+        self.room_name: str = channel_name
+        """the name of the room the bot joined to"""
         self.user_name: str = user_name
+        """the name of the bot"""
+
+
+class LeftEvent(EventData):
+    """When the bot left a room"""
+    def __init__(self, chat, channel_name, room):
+        super(LeftEvent, self).__init__(chat)
+        self.room_name: str = channel_name
+        """the name of the channel the bot left"""
+        self.cached_room: Optional[ChatRoom] = room
+        """the cached room state, might bo Null"""
 
 
 class ChatMessage(EventData):
+    """Represents a chat message"""
 
     def __init__(self, chat, parsed):
         super(ChatMessage, self).__init__(chat)
         self._parsed = parsed
-        self.text = parsed['parameters']
+        self.text: str = parsed['parameters']
+        """The message"""
+        self.bits: int = int(parsed['tags'].get('bits', '0'))
+        """The amount of Bits the user cheered"""
         self.sent_timestamp: int = int(parsed['tags'].get('tmi-sent-ts'))
+        """the unix timestamp of when the message was sent"""
+        self.reply_parent_msg_id: Optional[str] = parsed['tags'].get('reply-parent-msg-id')
+        """An ID that uniquely identifies the parent message that this message is replying to."""
+        self.reply_parent_user_id: Optional[str] = parsed['tags'].get('reply-parent-user-id')
+        """An ID that identifies the sender of the parent message."""
+        self.reply_parent_user_login: Optional[str] = parsed['tags'].get('reply-parent-user-login')
+        """The login name of the sender of the parent message. """
+        self.reply_parent_display_name: Optional[str] = parsed['tags'].get('reply-parent-display-name')
+        """The display name of the sender of the parent message."""
+        self.reply_parent_msg_body: Optional[str] = parsed['tags'].get('reply-parent-msg-body')
+        """The text of the parent message"""
         self.emotes = parsed['tags'].get('emotes')
+        """The emotes used in the message"""
         self.id: str = parsed['tags'].get('id')
+        """the ID of the message"""
 
     @property
     def room(self) -> Optional[ChatRoom]:
+        """The channel the message was issued in"""
         return self.chat.room_cache.get(self._parsed['command']['channel'][1:])
 
     @property
     def user(self) -> ChatUser:
+        """The user that issued the message"""
         return ChatUser(self.chat, self._parsed)
 
     async def reply(self, text: str):
+        """Reply to this message"""
         await self.chat._send_message(f'@reply-parent-msg-id={self.id} PRIVMSG #{self.room.name} :{text}')
 
 
 class ChatCommand(ChatMessage):
+    """Represents a command"""
 
     def __init__(self, chat, parsed):
         super(ChatCommand, self).__init__(chat, parsed)
         self.name: str = parsed['command'].get('bot_command')
+        """the name of the command"""
         self.parameter: str = parsed['command'].get('bot_command_params', '')
+        """the parameter given to the command"""
 
 
 class ChatSub:
+    """Represents a sub to a channel"""
 
     def __init__(self, chat, parsed):
         self.chat: 'Chat' = chat
         self._parsed = parsed
         self.sub_type: str = parsed['tags'].get('msg-id')
+        """The type of sub given"""
         self.sub_message: str = parsed['parameters'] if parsed['parameters'] is not None else ''
+        """The message that was sent together with the sub"""
         self.sub_plan: str = parsed['tags'].get('msg-param-sub-plan')
+        """the ID of the subscription plan that was used"""
         self.sub_plan_name: str = parsed['tags'].get('msg-param-sub-plan-name')
+        """the name of the subscription plan that was used"""
         self.system_message: str = parsed['tags'].get('system-msg', '').replace('\\\\s', ' ')
+        """the system message that was generated for this sub"""
 
     @property
     def room(self):
+        """The room this sub was issued in"""
         return self.chat.room_cache.get(self._parsed['command']['channel'][1:])
 
 
 class Chat:
+    """The chat bot instance"""
 
     def __init__(self, twitch: Twitch, connection_url: Optional[str] = None):
         self.logger: Logger = getLogger('twitchAPI.chat')
@@ -150,6 +331,7 @@ class Chat:
         self._command_handler = {}
         self.room_cache: Dict[str, ChatRoom] = {}
         self._room_join_locks = []
+        self._room_leave_locks = []
         self._closing: bool = False
 
     def __await__(self):
@@ -165,7 +347,7 @@ class Chat:
     # command parsing
     ##################################################################################################################################################
 
-    def parse_irc_message(self, message: str):
+    def _parse_irc_message(self, message: str):
         parsed_message = {
             'tags': None,
             'source': None,
@@ -198,22 +380,22 @@ class Chat:
             idx = end_idx + 1
             raw_parameters_component = message[idx::]
 
-        parsed_message['command'] = self.parse_irc_command(raw_command_component)
+        parsed_message['command'] = self._parse_irc_command(raw_command_component)
 
         if parsed_message['command'] is None:
             return None
 
         if raw_tags_component is not None:
-            parsed_message['tags'] = self.parse_irc_tags(raw_tags_component)
+            parsed_message['tags'] = self._parse_irc_tags(raw_tags_component)
 
-        parsed_message['source'] = self.parse_irc_source(raw_source_component)
+        parsed_message['source'] = self._parse_irc_source(raw_source_component)
         parsed_message['parameters'] = raw_parameters_component
         if raw_parameters_component is not None and raw_parameters_component[0] == '!':
-            parsed_message['command'] = self.parse_irc_parameters(raw_parameters_component, parsed_message['command'])
+            parsed_message['command'] = self._parse_irc_parameters(raw_parameters_component, parsed_message['command'])
 
         return parsed_message
 
-    def parse_irc_parameters(self, raw_parameters_component: str, command):
+    def _parse_irc_parameters(self, raw_parameters_component: str, command):
         idx = 0
         command_parts = raw_parameters_component[1::].strip()
         try:
@@ -225,7 +407,7 @@ class Chat:
         command['bot_command_params'] = command_parts[params_idx:].strip()
         return command
 
-    def parse_irc_source(self, raw_source_component: str):
+    def _parse_irc_source(self, raw_source_component: str):
         if raw_source_component is None:
             return None
         source_parts = raw_source_component.split('!')
@@ -234,7 +416,7 @@ class Chat:
             'host': source_parts[1] if len(source_parts) == 2 else source_parts[0]
         }
 
-    def parse_irc_tags(self, raw_tags_component: str):
+    def _parse_irc_tags(self, raw_tags_component: str):
         tags_to_ignore = ('client-nonce', 'flags')
         parsed_tags = {}
 
@@ -278,7 +460,7 @@ class Chat:
                     parsed_tags[parsed_tag[0]] = tag_value
         return parsed_tags
 
-    def parse_irc_command(self, raw_command_component: str):
+    def _parse_irc_command(self, raw_command_component: str):
         command_parts = raw_command_component.split(' ')
 
         if command_parts[0] in ('JOIN', 'PART', 'NOTICE', 'CLEARCHAT', 'HOSTTARGET', 'PRIVMSG', 'USERSTATE', 'ROOMSTATE', '001', 'USERNOTICE'):
@@ -410,7 +592,7 @@ class Chat:
                     for m in messages:
                         if len(m) == 0:
                             continue
-                        parsed = self.parse_irc_message(m)
+                        parsed = self._parse_irc_message(m)
                         # a message we don't know or don't care about
                         if parsed is None:
                             continue
@@ -421,7 +603,8 @@ class Chat:
                             'ROOMSTATE': self._handle_room_state,
                             'JOIN': self._handle_join,
                             'USERNOTICE': self._handle_user_notice,
-                            'CAP': self._handle_cap_reply
+                            'CAP': self._handle_cap_reply,
+                            'PART': self._handle_part
                         }
                         handler = handlers.get(parsed['command']['command'])
                         if handler is not None:
@@ -456,6 +639,15 @@ class Chat:
             e = JoinEvent(self, ch, nick)
             for handler in self._event_handler.get(ChatEvent.JOIN, []):
                 asyncio.ensure_future(handler(e))
+
+    async def _handle_part(self, parsed: dict):
+        ch = parsed['command']['channel'][1:]
+        if ch in self._room_leave_locks:
+            self._room_leave_locks.remove(ch)
+        room = self.room_cache.pop(ch, None)
+        e = LeftEvent(self, ch, room)
+        for handler in self._event_handler.get(ChatEvent.LEFT, []):
+            asyncio.ensure_future(handler(e))
 
     async def _handle_user_notice(self, parsed: dict):
         if parsed['tags'].get('msg-id') == 'raid':
@@ -522,6 +714,10 @@ class Chat:
     ##################################################################################################################################################
 
     def register_command(self, name: str, handler: Callable) -> bool:
+        """Register a command
+
+        :param name: the name of the command
+        :param handler: The event handler"""
         name = name.lower()
         if self._command_handler.get(name) is not None:
             return False
@@ -529,16 +725,20 @@ class Chat:
         return True
 
     def register_event(self, event: ChatEvent, handler: Callable):
+        """Register a event handler
+
+        :param event: The Event you want to register the handler to
+        :param handler: The handler you want to register."""
         if self._event_handler.get(event) is None:
             self._event_handler[event] = [handler]
         else:
             self._event_handler[event].append(handler)
 
     async def join_room(self, chat_rooms: Union[List[str], str]):
-        """ join one or more chat rooms
+        """ join one or more chat rooms\n
+        Will only exit once all given chat rooms where successfully joined
 
-        :param chat_rooms:
-        :return:
+        :param chat_rooms: the Room or rooms you want to leave
         """
         if isinstance(chat_rooms, str):
             chat_rooms = [chat_rooms]
@@ -562,3 +762,18 @@ class Chat:
             room = f'#{room}'
         await self._send_message(f'PRIVMSG {room} :{text}')
 
+    async def leave_room(self, chat_rooms: Union[List[str], str]):
+        """leave one or more chat rooms\n
+        Will only exit once all given chat rooms where successfully left
+
+        :param chat_rooms: The room or rooms you want to leave"""
+        if isinstance(chat_rooms, str):
+            chat_rooms = [chat_rooms]
+        room_str = ','.join([f'#{c}' if c[0] != '#' else c for c in chat_rooms])
+        target = [c[1:].lower() if c[0] == '#' else c.lower() for c in chat_rooms]
+        for r in target:
+            self._room_leave_locks.append(r)
+        await self._send_message(f'PART {room_str}')
+        # wait to leave all rooms
+        while any([r in self._room_leave_locks for r in target]):
+            await asyncio.sleep(0.01)
