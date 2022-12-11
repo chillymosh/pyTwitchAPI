@@ -171,6 +171,11 @@ class TwitchUserFollow(TwitchObject):
     followed_at: datetime
 
 
+class TwitchUserFollowResult(AsyncIterTwitchObject[TwitchUserFollow]):
+    total: int
+    data: List[TwitchUserFollow]
+
+
 class DateRange(TwitchObject):
     ended_at: datetime
     started_at: datetime
@@ -824,3 +829,14 @@ class Playlist(TwitchObject):
     id: str
     image_url: str
     description: str
+
+
+class Chatter(TwitchObject):
+    user_id: str
+    user_login: str
+    user_name: str
+
+
+class GetChattersResponse(AsyncIterTwitchObject[Chatter]):
+    data: List[Chatter]
+    total: int
