@@ -9,7 +9,7 @@ from typing_extensions import TypedDict
 __all__ = ['AnalyticsReportType', 'AuthScope', 'ModerationEventType', 'TimePeriod', 'SortMethod', 'HypeTrainContributionMethod',
            'VideoType', 'AuthType', 'StatusCode', 'PubSubResponseError', 'CustomRewardRedemptionStatus', 'SortOrder',
            'BlockSourceContext', 'BlockReason', 'EntitlementFulfillmentStatus', 'PollStatus', 'PredictionStatus', 'AutoModAction',
-           'AutoModCheckEntry', 'DropsEntitlementFulfillmentStatus',
+           'AutoModCheckEntry', 'DropsEntitlementFulfillmentStatus', 'SoundtrackSourceType',
            'ChatEvent', 'ChatRoom',
            'TwitchAPIException', 'InvalidRefreshTokenException', 'InvalidTokenException', 'NotFoundException', 'TwitchAuthorizationException',
            'UnauthorizedException', 'MissingScopeException', 'TwitchBackendException', 'PubSubListenTimeoutException', 'MissingAppSecretException',
@@ -37,6 +37,7 @@ class AuthScope(Enum):
     CHANNEL_MANAGE_BROADCAST = 'channel:manage:broadcast'
     CHANNEL_READ_REDEMPTIONS = 'channel:read:redemptions'
     CHANNEL_MANAGE_REDEMPTIONS = 'channel:manage:redemptions'
+    CHANNEL_READ_CHARITY = 'channel:read:charity'
     CLIPS_EDIT = 'clips:edit'
     USER_EDIT = 'user:edit'
     USER_EDIT_BROADCAST = 'user:edit:broadcast'
@@ -76,6 +77,13 @@ class AuthScope(Enum):
     CHANNEL_MANAGE_VIPS = 'channel:manage:vips'
     USER_MANAGE_WHISPERS = 'user:manage:whispers'
     MODERATOR_READ_CHATTERS = 'moderator:read:chatters'
+    MODERATOR_READ_SHIELD_MODE = 'moderator:read:shield_mode'
+    MODERATOR_MANAGE_SHIELD_MODE = 'moderator:manage:shield_mode'
+    MODERATOR_READ_AUTOMOD_SETTINGS = 'moderator:read:automod_settings'
+    MODERATOR_MANAGE_AUTOMOD_SETTINGS = 'moderator:manage:automod_settings'
+    MODERATOR_READ_FOLLOWERS = 'moderator:read:followers'
+    MODERATOR_MANAGE_SHOUTOUTS = 'moderator:manage:shoutouts'
+    MODERATOR_READ_SHOUTOUTS = 'moderator:read:shoutouts'
 
 
 class ModerationEventType(Enum):
@@ -246,6 +254,7 @@ class SoundtrackSourceType(Enum):
 # CHAT
 
 class ChatEvent(Enum):
+    """Represents the possible events to listen for using :const:`~twitchAPI.chat.Chat.register_event()`"""
     READY = 'ready'
     """Triggered when the bot is started up and ready"""
     MESSAGE = 'message'
@@ -262,6 +271,17 @@ class ChatEvent(Enum):
     """Triggered when the bot joins a chat channel"""
     LEFT = 'left'
     """Triggered when the bot leaves a chat channel"""
+    USER_LEFT = 'user_left'
+    """Triggered when a user leaves a chat channel"""
+    MESSAGE_DELETE = 'message_delete'
+    """Triggered when a message gets deleted from a channel"""
+    CHAT_CLEARED = 'chat_cleared'
+    """Triggered when a user was banned, timed out or all messaged from a user where deleted"""
+    WHISPER = 'whisper'
+    """Triggered when someone whispers to your bot. NOTE: You need the :const:`~twitchAPI.types.AuthScope.WHISPERS_READ` Auth Scope
+    to get this Event."""
+    NOTICE = 'notice'
+    """Triggerd on server notice"""
 
 
 @dataclass

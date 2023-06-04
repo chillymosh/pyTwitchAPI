@@ -6,6 +6,8 @@ Objects used by the Twitch API
 from datetime import datetime
 from enum import Enum
 from typing import Optional, Union, List, Dict, Generic, TypeVar
+
+from aiohttp import ClientSession
 from dateutil import parser as du_parser
 
 from twitchAPI.helper import build_url
@@ -14,8 +16,33 @@ from twitchAPI.types import StatusCode, VideoType, HypeTrainContributionMethod, 
 
 T = TypeVar('T')
 
+__all__ = ['TwitchObject', 'IterTwitchObject', 'AsyncIterTwitchObject', 'TwitchUser', 'TwitchUserFollow', 'TwitchUserFollowResult', 'DateRange',
+           'ExtensionAnalytic', 'GameAnalytics', 'CreatorGoal', 'BitsLeaderboardEntry', 'BitsLeaderboard', 'ProductCost', 'ProductData',
+           'ExtensionTransaction', 'ChatSettings', 'CreatedClip', 'Clip', 'CodeStatus', 'Game', 'AutoModStatus', 'BannedUser', 'BanUserResponse',
+           'BlockedTerm', 'Moderator', 'CreateStreamMarkerResponse', 'Stream', 'StreamMarker', 'StreamMarkers', 'GetStreamMarkerResponse',
+           'BroadcasterSubscription', 'BroadcasterSubscriptions', 'UserSubscription', 'StreamTag', 'TeamUser', 'ChannelTeam', 'UserExtension',
+           'ActiveUserExtension', 'UserActiveExtensions', 'VideoMutedSegments', 'Video', 'ChannelInformation', 'SearchChannelResult',
+           'SearchCategoryResult', 'StartCommercialResult', 'Cheermote', 'GetCheermotesResponse', 'HypeTrainContribution', 'HypeTrainEventData',
+           'HypeTrainEvent', 'DropsEntitlement', 'MaxPerStreamSetting', 'MaxPerUserPerStreamSetting', 'GlobalCooldownSetting', 'CustomReward',
+           'PartialCustomReward', 'CustomRewardRedemption', 'ChannelEditor', 'BlockListEntry', 'PollChoice', 'Poll', 'Predictor', 'PredictionOutcome',
+           'Prediction', 'RaidStartResult', 'ChatBadgeVersion', 'ChatBadge', 'Emote', 'GetEmotesResponse', 'EventSubSubscription',
+           'GetEventSubSubscriptionResult', 'StreamCategory', 'ChannelStreamScheduleSegment', 'StreamVacation', 'ChannelStreamSchedule',
+           'ChannelVIP', 'UserChatColor', 'Artist', 'Album', 'Soundtrack', 'TrackSource', 'CurrentSoundtrack', 'Playlist', 'Chatter',
+           'GetChattersResponse', 'ShieldModeStatus', 'CharityAmount', 'CharityCampaign', 'CharityCampaignDonation', 'AutoModSettings',
+           'ChannelFollower', 'ChannelFollowersResult', 'FollowedChannel', 'FollowedChannelsResult']
+
 
 class TwitchObject:
+    """
+    A lot of API calls return a child of this in some way (either directly or via generator).
+    You can always use the :const:`~twitchAPI.object.TwitchObject.to_dict()` method to turn that object to a dictionary.
+
+    Example:
+
+    .. code-block:: python
+
+        blocked_term = await twitch.add_blocked_term('broadcaster_id', 'moderator_id', 'bad_word')
+        print(blocked_term.id)"""
     @staticmethod
     def _val_by_instance(instance, val):
         if val is None:
@@ -43,6 +70,8 @@ class TwitchObject:
     def _dict_val_by_instance(instance, val, include_none_values):
         if val is None:
             return None
+        if instance is None:
+            return val
         origin = instance.__origin__ if hasattr(instance, '__origin__') else None
         if instance == datetime:
             return val.isoformat() if val is not None else None
@@ -75,7 +104,10 @@ class TwitchObject:
         return d
 
     def to_dict(self, include_none_values: bool = False) -> dict:
-        """build dict based on annotation types"""
+        """build dict based on annotation types
+
+        :param include_none_values: if fields that have None values should be included in the dictionary
+        """
         d = {}
         annotations = self._get_annotations()
         for name, val in self.__dict__.items():
@@ -86,6 +118,8 @@ class TwitchObject:
             except AttributeError:
                 pass
             if val is None and not include_none_values:
+                continue
+            if name[0] == '_':
                 continue
             d[name] = TwitchObject._dict_val_by_instance(cls, val, include_none_values)
         return d
@@ -99,6 +133,18 @@ class TwitchObject:
 
 
 class IterTwitchObject(TwitchObject):
+    """Special type of :const:`~twitchAPI.object.TwitchObject`.
+       These usually have some list inside that you may want to dicrectly itterate over in your API usage but that also contain other usefull data
+       outside of that List.
+
+       Example:
+
+       .. code-block:: python
+
+          lb = await twitch.get_bits_leaderboard()
+          print(lb.total)
+          for e in lb:
+              print(f'#{e.rank:02d} - {e.user_name}: {e.score}')"""
 
     def __iter__(self):
         if not hasattr(self, 'data') or not isinstance(self.__getattribute__('data'), list):
@@ -108,6 +154,17 @@ class IterTwitchObject(TwitchObject):
 
 
 class AsyncIterTwitchObject(TwitchObject, Generic[T]):
+    """A few API calls will have usefull data outside of the list the pagination itterates over.
+       For those cases, this object exist.
+
+       Example:
+
+       .. code-block:: python
+
+           schedule = await twitch.get_channel_stream_schedule('user_id')
+           print(schedule.broadcaster_name)
+           async for segment in schedule:
+               print(segment.title)"""
 
     def __init__(self, _data, **kwargs):
         super(AsyncIterTwitchObject, self).__init__(**kwargs)
@@ -128,11 +185,9 @@ class AsyncIterTwitchObject(TwitchObject, Generic[T]):
         if self._data['param']['after'] is None:
             raise StopAsyncIteration()
         _url = build_url(self._data['url'], self._data['param'], remove_none=True, split_lists=self._data['split'])
-        if self._data['body'] is None:
-            response = await self._data['req'](_url, self._data['auth_t'], self._data['auth_s'])
-        else:
-            response = await self._data['req'](_url, self._data['auth_t'], self._data['auth_s'], body=self._data['body'])
-        _data = await response.json()
+        async with ClientSession() as session:
+            response = await self._data['req'](session, _url, self._data['auth_t'], self._data['auth_s'], self._data['body'])
+            _data = await response.json()
         _after = _data.get('pagination', {}).get('cursor')
         self._data['param']['after'] = _after
         if self._data['in_data']:
@@ -144,8 +199,10 @@ class AsyncIterTwitchObject(TwitchObject, Generic[T]):
                 continue
             self.__setattr__(name, TwitchObject._val_by_instance(cls, _data.get(name)))
         data = self.__getattribute__(self._data['iter_field'])
-        self.__idx = 0
-        return data[self.__idx]
+        self.__idx = 1
+        if len(data) == 0:
+            raise StopAsyncIteration()
+        return data[self.__idx - 1]
 
 
 class TwitchUser(TwitchObject):
@@ -167,6 +224,7 @@ class TwitchUserFollow(TwitchObject):
     from_login: str
     from_name: str
     to_id: str
+    to_login: str
     to_name: str
     followed_at: datetime
 
@@ -174,6 +232,30 @@ class TwitchUserFollow(TwitchObject):
 class TwitchUserFollowResult(AsyncIterTwitchObject[TwitchUserFollow]):
     total: int
     data: List[TwitchUserFollow]
+
+
+class ChannelFollower(TwitchObject):
+    followed_at: datetime
+    user_id: str
+    user_name: str
+    user_login: str
+
+
+class ChannelFollowersResult(AsyncIterTwitchObject[ChannelFollower]):
+    total: int
+    data: List[ChannelFollower]
+
+
+class FollowedChannel(TwitchObject):
+    broadcaster_id: str
+    broadcaster_login: str
+    broadcaster_name: str
+    followed_at: datetime
+
+
+class FollowedChannelsResult(AsyncIterTwitchObject[FollowedChannel]):
+    total: int
+    data: List[FollowedChannel]
 
 
 class DateRange(TwitchObject):
@@ -252,6 +334,7 @@ class ExtensionTransaction(TwitchObject):
 class ChatSettings(TwitchObject):
     broadcaster_id: str
     moderator_id: str
+    emote_mode: bool
     slow_mode: bool
     slow_mode_wait_time: int
     follower_mode: bool
@@ -361,6 +444,7 @@ class Stream(TwitchObject):
     thumbnail_url: str
     tag_ids: List[str]
     is_mature: bool
+    tags: List[str]
 
 
 class StreamMarker(TwitchObject):
@@ -398,7 +482,7 @@ class BroadcasterSubscription(TwitchObject):
     user_login: str
 
 
-class BroadcasterSubscriptions(IterTwitchObject):
+class BroadcasterSubscriptions(AsyncIterTwitchObject[BroadcasterSubscription]):
     total: int
     points: int
     data: List[BroadcasterSubscription]
@@ -495,6 +579,7 @@ class ChannelInformation(TwitchObject):
     broadcaster_language: str
     title: str
     delay: int
+    tags: List[str]
 
 
 class SearchChannelResult(ChannelInformation):
@@ -706,6 +791,10 @@ class ChatBadgeVersion(TwitchObject):
     image_url_1x: str
     image_url_2x: str
     image_url_4x: str
+    title: str
+    description: str
+    click_action: Optional[str]
+    click_url: Optional[str]
 
 
 class ChatBadge(TwitchObject):
@@ -840,3 +929,53 @@ class Chatter(TwitchObject):
 class GetChattersResponse(AsyncIterTwitchObject[Chatter]):
     data: List[Chatter]
     total: int
+
+
+class ShieldModeStatus(TwitchObject):
+    is_active: bool
+    moderator_id: str
+    moderator_login: str
+    moderator_name: str
+    last_activated_at: Optional[datetime]
+
+
+class CharityAmount(TwitchObject):
+    value: int
+    decimal_places: int
+    currency: str
+
+
+class CharityCampaign(TwitchObject):
+    id: str
+    broadcaster_id: str
+    broadcaster_login: str
+    broadcaster_name: str
+    charity_name: str
+    charity_description: str
+    charity_logo: str
+    charity_website: str
+    current_amount: CharityAmount
+    target_amount: CharityAmount
+
+
+class CharityCampaignDonation(TwitchObject):
+    id: str
+    campaign_id: str
+    user_id: str
+    user_name: str
+    user_login: str
+    amount: CharityAmount
+
+
+class AutoModSettings(TwitchObject):
+    broadcaster_id: str
+    moderator_id: str
+    overall_level: Optional[int]
+    disability: int
+    aggression: int
+    sexuality_sex_or_gender: int
+    misogyny: int
+    bullying: int
+    swearing: int
+    race_ethnicity_or_religion: int
+    sex_based_terms: int

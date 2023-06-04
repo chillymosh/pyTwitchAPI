@@ -35,14 +35,14 @@ Code example
     from twitchAPI.oauth import UserAuthenticator
     from twitchAPI.types import AuthScope
 
-    twitch = Twitch('my_app_id', 'my_app_secret')
+    twitch = await Twitch('my_app_id', 'my_app_secret')
 
     target_scope = [AuthScope.BITS_READ]
     auth = UserAuthenticator(twitch, target_scope, force_verify=False)
     # this will open your default browser and prompt you with the twitch verification website
-    token, refresh_token = auth.authenticate()
+    token, refresh_token = await auth.authenticate()
     # add User authentication
-    twitch.set_user_authentication(token, target_scope, refresh_token)
+    await twitch.set_user_authentication(token, target_scope, refresh_token)
 
 *******************
 Class Documentation
@@ -58,8 +58,7 @@ import webbrowser
 from aiohttp import web
 import asyncio
 from threading import Thread
-from time import sleep
-from concurrent.futures._base import CancelledError
+from concurrent.futures import CancelledError
 from logging import getLogger, Logger
 
 from typing import List, Union
@@ -188,7 +187,8 @@ class UserAuthenticator:
         self.__client_id: str = twitch.app_id
         self.scopes: List[AuthScope] = scopes
         self.force_verify: bool = force_verify
-        self.__logger: Logger = getLogger('twitchAPI.oauth')
+        self.logger: Logger = getLogger('twitchAPI.oauth')
+        """The logger used for OAuth related log messages"""
         self.url = url
         self.document: str = """<!DOCTYPE html>
         <html lang="en">
@@ -206,7 +206,7 @@ class UserAuthenticator:
         """The port that will be used. |default| :code:`17653`"""
         self.host: str = '0.0.0.0'
         """the host the webserver will bind to. |default| :code:`0.0.0.0`"""
-        self.__state: str = str(get_uuid())
+        self.state: str = str(get_uuid())
         self.__callback_func = None
         self.__server_running: bool = False
         self.__loop: Union[asyncio.AbstractEventLoop, None] = None
@@ -214,6 +214,7 @@ class UserAuthenticator:
         self.__thread: Union[Thread, None] = None
         self.__user_token: Union[str, None] = None
         self.__can_close: bool = False
+        self.__is_closed = False
 
     def __build_auth_url(self):
         params = {
@@ -222,7 +223,7 @@ class UserAuthenticator:
             'response_type': 'code',
             'scope': build_scope(self.scopes),
             'force_verify': str(self.force_verify).lower(),
-            'state': self.__state
+            'state': self.state
         }
         return build_url(TWITCH_AUTH_BASE_URL + 'oauth2/authorize', params)
 
@@ -233,12 +234,11 @@ class UserAuthenticator:
 
     async def __run_check(self):
         while not self.__can_close:
-            try:
-                await asyncio.sleep(1)
-            except (CancelledError, asyncio.CancelledError):
-                pass
-        for task in asyncio.all_tasks(self.__loop):
-            task.cancel()
+            await asyncio.sleep(0.1)
+        await self.__runner.shutdown()
+        await self.__runner.cleanup()
+        self.logger.info('shutting down oauth Webserver')
+        self.__is_closed = True
 
     def __run(self, runner: web.AppRunner):
         self.__runner = runner
@@ -248,7 +248,7 @@ class UserAuthenticator:
         site = web.TCPSite(runner, self.host, self.port)
         self.__loop.run_until_complete(site.start())
         self.__server_running = True
-        self.__logger.info('running oauth Webserver')
+        self.logger.info('running oauth Webserver')
         try:
             self.__loop.run_until_complete(self.__run_check())
         except (CancelledError, asyncio.CancelledError):
@@ -267,9 +267,9 @@ class UserAuthenticator:
 
     async def __handle_callback(self, request: web.Request):
         val = request.rel_url.query.get('state')
-        self.__logger.debug(f'got callback with state {val}')
+        self.logger.debug(f'got callback with state {val}')
         # invalid state!
-        if val != self.__state:
+        if val != self.state:
             return web.Response(status=401)
         self.__user_token = request.rel_url.query.get('code')
         if self.__user_token is None:
@@ -306,20 +306,24 @@ class UserAuthenticator:
         :rtype: None or (str, str)
         """
         self.__callback_func = callback_func
+        self.__can_close = False
+        self.__user_token = None
+        self.__is_closed = False
 
         if user_token is None:
             self.__start()
             # wait for the server to start up
             while not self.__server_running:
-                sleep(0.01)
+                await asyncio.sleep(0.01)
             # open in browser
             browser = webbrowser.get(browser_name)
             browser.open(self.__build_auth_url(), new=browser_new)
             while self.__user_token is None:
-                sleep(0.01)
+                await asyncio.sleep(0.01)
             # now we need to actually get the correct token
         else:
             self.__user_token = user_token
+            self.__is_closed = True
 
         param = {
             'client_id': self.__client_id,
@@ -329,11 +333,13 @@ class UserAuthenticator:
             'redirect_uri': self.url
         }
         url = build_url(TWITCH_AUTH_BASE_URL + 'oauth2/token', param)
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=self.__twitch.session_timeout) as session:
             async with session.post(url) as response:
                 data: dict = await response.json()
         if callback_func is None:
             self.stop()
+            while not self.__is_closed:
+                await asyncio.sleep(0.1)
             if data.get('access_token') is None:
                 raise TwitchAPIException(f'Authentication failed:\n{str(data)}')
             return data['access_token'], data['refresh_token']

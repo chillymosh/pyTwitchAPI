@@ -12,17 +12,25 @@
 #
 import os
 import sys
+import aiohttp
 sys.path.insert(0, os.path.abspath('..'))
 
 
 # -- Project information -----------------------------------------------------
 
 project = 'twitchAPI'
-copyright = '2022, Lena "Teekeks" During'
+copyright = '2023, Lena "Teekeks" During'
 author = 'Lena "Teekeks" During'
 
 # The full version, including alpha/beta/rc tags
-release = 'v3.1.1'
+release = None
+with open('../twitchAPI/__init__.py') as f:
+    for line in f.readlines():
+        if line.startswith('__version__'):
+            release = 'v' + line.split('= \'')[-1][:-2].strip()
+if release is None:
+    release = 'dev'
+
 language = 'en'
 
 master_doc = 'index'
@@ -41,6 +49,9 @@ extensions = [
     'recommonmark'
 ]
 
+aiohttp.client.ClientTimeout.__module__ = 'aiohttp'
+aiohttp.ClientTimeout.__module__ = 'aiohttp'
+
 autodoc_member_order = 'bysource'
 autodoc_class_signature = 'separated'
 
@@ -53,7 +64,8 @@ templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 
 intersphinx_mapping = {
-    'python': ('https://docs.python.org/3', None)
+    'python': ('https://docs.python.org/3', None),
+    'aio': ('https://docs.aiohttp.org/en/stable/', None)
 }
 
 rst_prolog = """
@@ -95,6 +107,7 @@ html_theme_options = {
     "header_links_before_dropdown": 4,
     "navbar_center": ["version-switcher", "navbar-nav"],
     "github_url": "https://github.com/Teekeks/pyTwitchAPI",
+    "pygment_dark_style": "monokai",
     "navbar_align": "left",
     "logo": {
         "text": "twitchAPI",

@@ -93,9 +93,10 @@ AsyncGenerator
 ==============
 
 AsyncGenerators are used to automatically itterate over all possible resuts of your API call, this will also automatically handle pagination for you.
-In some cases (for example stream schedules with repeating entries), this may result in a endless stream of entries returned so make sure to add your own
-exit conditions in such cases.
-The generated objects will always be children of :py:const:`~twitchAPI.object.TwitchObject`, see the docs of the API call to see the exact object type.
+In some cases (for example stream schedules with repeating entries), this may result in a endless stream of entries returned so make sure to add your
+own exit conditions in such cases.
+The generated objects will always be children of :py:const:`~twitchAPI.object.TwitchObject`, see the docs of the API call to see the exact
+object type.
 
 Example:
 
@@ -144,7 +145,7 @@ If you don't want to use App Authentication, Initialize like this:
 .. code-block:: python
 
     from twitchAPI.twitch import Twitch
-    twitch = Twitch('my_app_id', authenticate_app=False)
+    twitch = await Twitch('my_app_id', authenticate_app=False)
 
 
 User Authentication
@@ -155,7 +156,7 @@ Only use a user auth token, use this:
 .. code-block:: python
 
     from twitchAPI.twitch import Twitch
-    twitch = Twitch('my_app_id', authenticate_app=False)
+    twitch = await Twitch('my_app_id', authenticate_app=False)
     # make sure to set the second parameter as the scope used to generate the token
     await twitch.set_user_authentication('token', [], 'refresh_token')
 
@@ -199,8 +200,12 @@ Class Documentation
 *******************
 """
 import asyncio
+import aiohttp.helpers
+from datetime import datetime
 from aiohttp import ClientSession, ClientResponse
-from .helper import TWITCH_API_BASE_URL, TWITCH_AUTH_BASE_URL, build_scope, enum_value_or_none, datetime_to_str, remove_none_values, ResultType
+from aiohttp.client import ClientTimeout
+from .helper import TWITCH_API_BASE_URL, TWITCH_AUTH_BASE_URL, build_scope, enum_value_or_none, datetime_to_str, remove_none_values, ResultType, \
+    build_url
 from logging import getLogger, Logger
 from .object import *
 from .types import *
@@ -220,21 +225,26 @@ class Twitch:
                  app_secret: Optional[str] = None,
                  authenticate_app: bool = True,
                  target_app_auth_scope: Optional[List[AuthScope]] = None,
-                 base_url: str = TWITCH_API_BASE_URL):
+                 base_url: str = TWITCH_API_BASE_URL,
+                 session_timeout: Union[object, ClientTimeout] = aiohttp.helpers.sentinel):
         """
         :param app_id: Your app id
         :param app_secret: Your app secret, leave as None if you only want to use User Authentication |default| :code:`None`
         :param authenticate_app: If true, auto generate a app token on startup |default| :code:`True`
         :param target_app_auth_scope: AuthScope to use if :code:`authenticate_app` is True |default| :code:`None`
         :param base_url: The URL to the Twitch API |default| :const:`~twitchAPI.helper.TWITCH_API_BASE_URL`
+        :param session_timeout: Override the time in seconds before any request times out. Defaults to aiohttp default (300 seconds)
         """
         self.app_id: Optional[str] = app_id
         self.app_secret: Optional[str] = app_secret
-        self.__logger: Logger = getLogger('twitchAPI.twitch')
+        self.logger: Logger = getLogger('twitchAPI.twitch')
+        """The logger used for Twitch API call related log messages"""
         self.user_auth_refresh_callback: Optional[Callable[[str, str], Awaitable[None]]] = None
         """If set, gets called whenever a user auth token gets refreshed. Parameter: Auth Token, Refresh Token |default| :code:`None`"""
         self.app_auth_refresh_callback: Optional[Callable[[str], Awaitable[None]]] = None
         """If set, gets called whenever a app auth token gets refreshed. Parameter: Auth Token |default| :code:`None`"""
+        self.session_timeout: Union[object, ClientTimeout] = session_timeout
+        """Override the time in seconds before any request times out. Defaults to aiohttp default (300 seconds)"""
         self.__app_auth_token: Optional[str] = None
         self.__app_auth_scope: List[AuthScope] = []
         self.__has_app_auth: bool = False
@@ -248,6 +258,15 @@ class Twitch:
         self._target_app_scope = target_app_auth_scope
         self.base_url: str = base_url
         """The URL to the Twitch API used"""
+        self._user_token_refresh_lock: bool = False
+        self._app_token_refresh_lock: bool = False
+        self._r_lookup: Dict[str, Callable] = {
+            'get': self.__api_get_request,
+            'post': self.__api_post_request,
+            'delete': self.__api_delete_request,
+            'patch': self.__api_patch_request,
+            'put': self.__api_put_request
+        }
 
     def __await__(self):
         if self._authenticate_app:
@@ -255,12 +274,13 @@ class Twitch:
             yield from t
         return self
 
-    async def close(self):
+    @staticmethod
+    async def close():
         """Gracefully close the connection to the Twitch API"""
         # ensure that asyncio actually gracefully shut down
         await asyncio.sleep(0.25)
 
-    def __generate_header(self, auth_type: 'AuthType', required_scope: List[AuthScope]) -> dict:
+    def __generate_header(self, auth_type: 'AuthType', required_scope: List[Union[AuthScope, List[AuthScope]]]) -> dict:
         header = {"Client-ID": self.app_id}
         if auth_type == AuthType.EITHER:
             has_auth, target, token, scope = self.__get_used_either_auth(required_scope)
@@ -271,15 +291,23 @@ class Twitch:
             if not self.__has_app_auth:
                 raise UnauthorizedException('Require app authentication!')
             for s in required_scope:
-                if s not in self.__app_auth_scope:
-                    raise MissingScopeException('Require app auth scope ' + s.name)
+                if isinstance(s, list):
+                    if not any([x in self.__app_auth_scope for x in s]):
+                        raise MissingScopeException(f'Require at least one of the following app auth scopes: {", ".join([x.name for x in s])}')
+                else:
+                    if s not in self.__app_auth_scope:
+                        raise MissingScopeException('Require app auth scope ' + s.name)
             header['Authorization'] = f'Bearer {self.__app_auth_token}'
         elif auth_type == AuthType.USER:
             if not self.__has_user_auth:
                 raise UnauthorizedException('require user authentication!')
             for s in required_scope:
-                if s not in self.__user_auth_scope:
-                    raise MissingScopeException('Require user auth scope ' + s.name)
+                if isinstance(s, list):
+                    if not any([x in self.__user_auth_scope for x in s]):
+                        raise MissingScopeException(f'Require at least one of the following user auth scopes: {", ".join([x.name for x in s])}')
+                else:
+                    if s not in self.__user_auth_scope:
+                        raise MissingScopeException('Require user auth scope ' + s.name)
             header['Authorization'] = f'Bearer {self.__user_auth_token}'
         elif auth_type == AuthType.NONE:
             # set one anyway for better performance if possible but don't error if none found
@@ -327,22 +355,35 @@ class Twitch:
     async def refresh_used_token(self):
         """Refreshes the currently used token"""
         if self.__has_user_auth:
-            self.__logger.debug('refreshing user token')
             from .oauth import refresh_access_token
-            self.__user_auth_token, self.__user_auth_refresh_token = await refresh_access_token(self.__user_auth_refresh_token,
-                                                                                                self.app_id,
-                                                                                                self.app_secret)
-            if self.user_auth_refresh_callback is not None:
-                await self.user_auth_refresh_callback(self.__user_auth_token, self.__user_auth_refresh_token)
+            if self._user_token_refresh_lock:
+                while self._user_token_refresh_lock:
+                    await asyncio.sleep(0.1)
+            else:
+                self.logger.debug('refreshing user token')
+                self._user_token_refresh_lock = True
+                self.__user_auth_token, self.__user_auth_refresh_token = await refresh_access_token(self.__user_auth_refresh_token,
+                                                                                                    self.app_id,
+                                                                                                    self.app_secret)
+                self._user_token_refresh_lock = False
+                if self.user_auth_refresh_callback is not None:
+                    await self.user_auth_refresh_callback(self.__user_auth_token, self.__user_auth_refresh_token)
         else:
-            await self.__generate_app_token()
-            if self.app_auth_refresh_callback is not None:
-                await self.app_auth_refresh_callback(self.__app_auth_token)
+            if self._app_token_refresh_lock:
+                while self._app_token_refresh_lock:
+                    await asyncio.sleep(0.1)
+            else:
+                self._app_token_refresh_lock = True
+                self.logger.debug('refreshing app token')
+                await self.__generate_app_token()
+                self._app_token_refresh_lock = False
+                if self.app_auth_refresh_callback is not None:
+                    await self.app_auth_refresh_callback(self.__app_auth_token)
 
     async def __check_request_return(self,
+                                     session: ClientSession,
                                      response: ClientResponse,
                                      retry_func: Callable,
-                                     reply_func_has_data: bool,
                                      url: str,
                                      auth_type: 'AuthType',
                                      required_scope: List[AuthScope],
@@ -352,25 +393,19 @@ class Twitch:
         if self.auto_refresh_auth and retries > 0:
             if response.status == 401:
                 # unauthorized, lets try to refresh the token once
-                self.__logger.debug('got 401 response -> try to refresh token')
+                self.logger.debug('got 401 response -> try to refresh token')
                 await self.refresh_used_token()
-                if reply_func_has_data:
-                    return await retry_func(url, auth_type, required_scope, data=data, retries=retries - 1)
-                else:
-                    return await retry_func(url, auth_type, required_scope, retries=retries - 1)
+                return await retry_func(session, url, auth_type, required_scope, data=data, retries=retries - 1)
             elif response.status == 503:
                 # service unavailable, retry exactly once as recommended by twitch documentation
-                self.__logger.debug('got 503 response -> retry once')
-                if reply_func_has_data:
-                    return await retry_func(url, auth_type, required_scope, data=data, retries=retries - 1)
-                else:
-                    return await retry_func(url, auth_type, required_scope, retries=retries - 1)
+                self.logger.debug('got 503 response -> retry once')
+                return await retry_func(session, url, auth_type, required_scope, data=data, retries=retries - 1)
         elif self.auto_refresh_auth and retries <= 0:
             if response.status == 503:
                 raise TwitchBackendException('The Twitch API returns a server error')
             if response.status == 401:
                 msg = (await response.json()).get('message', '')
-                self.__logger.debug(f'got 401 response and can\'t refresh. Message: "{msg}"')
+                self.logger.debug(f'got 401 response and can\'t refresh. Message: "{msg}"')
                 raise UnauthorizedException(msg)
         if response.status == 500:
             raise TwitchBackendException('Internal Server Error')
@@ -384,7 +419,7 @@ class Twitch:
         if response.status == 404:
             raise TwitchResourceNotFound()
         if response.status == 429 or str(response.headers.get('Ratelimit-Remaining', '')) == '0':
-            self.__logger.warning('reached rate limit, waiting for reset')
+            self.logger.warning('reached rate limit, waiting for reset')
             import time
             reset = int(response.headers['Ratelimit-Reset'])
             # wait a tiny bit longer to ensure that we are definitely beyond the rate limit
@@ -392,142 +427,113 @@ class Twitch:
         return response
 
     async def __api_post_request(self,
+                                 session: ClientSession,
                                  url: str,
                                  auth_type: 'AuthType',
-                                 required_scope: List[AuthScope],
+                                 required_scope: List[Union[AuthScope, List[AuthScope]]],
                                  data: Optional[dict] = None,
                                  retries: int = 1) -> ClientResponse:
         """Make POST request with authorization"""
         headers = self.__generate_header(auth_type, required_scope)
-        self.__logger.debug(f'making POST request to {url}')
-        async with ClientSession() as session:
-            if data is None:
-                req = await session.post(url, headers=headers)
-            else:
-                req = await session.post(url, headers=headers, json=data)
-        return await self.__check_request_return(req, self.__api_post_request, True, url, auth_type, required_scope, data, retries)
+        self.logger.debug(f'making POST request to {url}')
+        req = await session.post(url, headers=headers, json=data)
+        return await self.__check_request_return(session, req, self.__api_post_request, url, auth_type, required_scope, data, retries)
 
     async def __api_put_request(self,
+                                session: ClientSession,
                                 url: str,
                                 auth_type: 'AuthType',
-                                required_scope: List[AuthScope],
+                                required_scope: List[Union[AuthScope, List[AuthScope]]],
                                 data: Optional[dict] = None,
                                 retries: int = 1) -> ClientResponse:
         """Make PUT request with authorization"""
         headers = self.__generate_header(auth_type, required_scope)
-        self.__logger.debug(f'making PUT request to {url}')
-        async with ClientSession() as session:
-            if data is None:
-                req = await session.put(url, headers=headers)
-            else:
-                req = await session.put(url, headers=headers, json=data)
-        return await self.__check_request_return(req, self.__api_put_request, True, url, auth_type, required_scope, data, retries)
+        self.logger.debug(f'making PUT request to {url}')
+        req = await session.put(url, headers=headers, json=data)
+        return await self.__check_request_return(session, req, self.__api_put_request, url, auth_type, required_scope, data, retries)
 
     async def __api_patch_request(self,
+                                  session: ClientSession,
                                   url: str,
                                   auth_type: 'AuthType',
-                                  required_scope: List[AuthScope],
+                                  required_scope: List[Union[AuthScope, List[AuthScope]]],
                                   data: Optional[dict] = None,
                                   retries: int = 1) -> ClientResponse:
         """Make PATCH request with authorization"""
         headers = self.__generate_header(auth_type, required_scope)
-        self.__logger.debug(f'making PATCH request to {url}')
-        async with ClientSession() as session:
-            if data is None:
-                req = await session.patch(url, headers=headers)
-            else:
-                req = await session.patch(url, headers=headers, json=data)
-        return await self.__check_request_return(req, self.__api_patch_request, True, url, auth_type, required_scope, data, retries)
+        self.logger.debug(f'making PATCH request to {url}')
+        req = await session.patch(url, headers=headers, json=data)
+        return await self.__check_request_return(session, req, self.__api_patch_request, url, auth_type, required_scope, data, retries)
 
     async def __api_delete_request(self,
+                                   session: ClientSession,
                                    url: str,
                                    auth_type: 'AuthType',
-                                   required_scope: List[AuthScope],
+                                   required_scope: List[Union[AuthScope, List[AuthScope]]],
                                    data: Optional[dict] = None,
                                    retries: int = 1) -> ClientResponse:
         """Make DELETE request with authorization"""
         headers = self.__generate_header(auth_type, required_scope)
-        self.__logger.debug(f'making DELETE request to {url}')
-        async with ClientSession() as session:
-            if data is None:
-                req = await session.delete(url, headers=headers)
-            else:
-                req = await session.delete(url, headers=headers, json=data)
-        return await self.__check_request_return(req, self.__api_delete_request, True, url, auth_type, required_scope, data, retries)
+        self.logger.debug(f'making DELETE request to {url}')
+        req = await session.delete(url, headers=headers, json=data)
+        return await self.__check_request_return(session, req, self.__api_delete_request, url, auth_type, required_scope, data, retries)
 
     async def __api_get_request(self,
+                                session: ClientSession,
                                 url: str,
                                 auth_type: 'AuthType',
-                                required_scope: List[AuthScope],
+                                required_scope: List[Union[AuthScope, List[AuthScope]]],
+                                data: Optional[dict] = None,
                                 retries: int = 1) -> ClientResponse:
         """Make GET request with authorization"""
         headers = self.__generate_header(auth_type, required_scope)
-        self.__logger.debug(f'making GET request to {url}')
-        async with ClientSession() as session:
-            req = await session.get(url, headers=headers)
-        return await self.__check_request_return(req, self.__api_get_request, False, url, auth_type, required_scope, None, retries)
+        self.logger.debug(f'making GET request to {url}')
+        req = await session.get(url, headers=headers, json=data)
+        return await self.__check_request_return(session, req, self.__api_get_request, url, auth_type, required_scope, data, retries)
 
     async def _build_generator(self,
                                req,
                                url: str,
                                url_params: dict,
                                auth_type: AuthType,
-                               auth_scope: List[AuthScope],
+                               auth_scope: List[Union[AuthScope, List[AuthScope]]],
                                return_type: T,
                                body_data: Optional[dict] = None,
                                split_lists: bool = False,
                                error_handler: Optional[Dict[int, BaseException]] = None) -> AsyncGenerator[T, None]:
-        r_lookup: Dict[str, Callable] = {
-            'get': self.__api_get_request,
-            'post': self.__api_post_request,
-            'delete': self.__api_delete_request,
-            'patch': self.__api_patch_request,
-            'put': self.__api_put_request
-        }
-        req = r_lookup.get(req.lower())
+        req = self._r_lookup.get(req.lower())
         _after = url_params.get('after')
         _first = True
-        while _first or _after is not None:
-            url_params['after'] = _after
-            _url = build_url(self.base_url + url, url_params, remove_none=True, split_lists=split_lists)
-            if body_data is None:
-                response = await req(_url, auth_type, auth_scope)
-            else:
-                response = await req(_url, auth_type, auth_scope, data=body_data)
-            if error_handler is not None:
-                if response.status in error_handler.keys():
-                    raise error_handler[response.status]
-            data = await response.json()
-            for entry in data.get('data', []):
-                yield return_type(**entry)
-            _after = data.get('pagination', {}).get('cursor')
-            _first = False
+        async with ClientSession(timeout=self.session_timeout) as session:
+            while _first or _after is not None:
+                url_params['after'] = _after
+                _url = build_url(self.base_url + url, url_params, remove_none=True, split_lists=split_lists)
+                response = await req(session, _url, auth_type, auth_scope, data=body_data)
+                if error_handler is not None:
+                    if response.status in error_handler.keys():
+                        raise error_handler[response.status]
+                data = await response.json()
+                for entry in data.get('data', []):
+                    yield return_type(**entry)
+                _after = data.get('pagination', {}).get('cursor')
+                _first = False
 
     async def _build_iter_result(self,
                                  req,
                                  url: str,
                                  url_params: dict,
                                  auth_type: AuthType,
-                                 auth_scope: List[AuthScope],
+                                 auth_scope: List[Union[AuthScope, List[AuthScope]]],
                                  return_type: T,
                                  body_data: Optional[dict] = None,
                                  split_lists: bool = False,
                                  iter_field: str = 'data',
                                  in_data: bool = False):
-        r_lookup: Dict[str, Callable] = {
-            'get': self.__api_get_request,
-            'post': self.__api_post_request,
-            'delete': self.__api_delete_request,
-            'patch': self.__api_patch_request,
-            'put': self.__api_put_request
-        }
-        req = r_lookup.get(req.lower())
+        req = self._r_lookup.get(req.lower())
         _url = build_url(self.base_url + url, url_params, remove_none=True, split_lists=split_lists)
-        if body_data is None:
-            response = await req(_url, auth_type, auth_scope)
-        else:
-            response = await req(_url, auth_type, auth_scope, data=body_data)
-        data = await response.json()
+        async with ClientSession(timeout=self.session_timeout) as session:
+            response = await req(session, _url, auth_type, auth_scope, data=body_data)
+            data = await response.json()
         url_params['after'] = data.get('pagination', {}).get('cursor')
         if in_data:
             data = data['data']
@@ -549,49 +555,42 @@ class Twitch:
                             url: str,
                             url_params: dict,
                             auth_type: AuthType,
-                            auth_scope: List[AuthScope],
+                            auth_scope: List[Union[AuthScope, List[AuthScope]]],
                             return_type: T,
                             body_data: Optional[dict] = None,
                             split_lists: bool = False,
                             get_from_data: bool = True,
                             result_type: ResultType = ResultType.RETURN_TYPE,
                             error_handler: Optional[Dict[int, BaseException]] = None):
-        r_lookup: Dict[str, Callable] = {
-            'get': self.__api_get_request,
-            'post': self.__api_post_request,
-            'delete': self.__api_delete_request,
-            'patch': self.__api_patch_request,
-            'put': self.__api_put_request
-        }
-        req = r_lookup.get(req.lower())
-        _url = build_url(self.base_url + url, url_params, remove_none=True, split_lists=split_lists)
-        if body_data is None:
-            response = await req(_url, auth_type, auth_scope)
-        else:
-            response = await req(_url, auth_type, auth_scope, data=body_data)
-        if error_handler is not None:
-            if response.status in error_handler.keys():
-                raise error_handler[response.status]
-        if result_type == ResultType.STATUS_CODE:
-            return response.status
-        if result_type == ResultType.TEXT:
-            return await response.text()
-        if return_type is not None:
-            data = await response.json()
-            if isinstance(return_type, dict):
-                return data
-            origin = return_type.__origin__ if hasattr(return_type, '__origin__') else None
-            if origin == list:
-                c = return_type.__args__[0]
-                return [x if isinstance(x, c) else c(**x) for x in data['data']]
-            if get_from_data:
-                d = data['data']
-                if isinstance(d, list):
-                    return return_type(**d[0])
+        async with ClientSession(timeout=self.session_timeout) as session:
+            req = self._r_lookup.get(req.lower())
+            _url = build_url(self.base_url + url, url_params, remove_none=True, split_lists=split_lists)
+            response = await req(session, _url, auth_type, auth_scope, data=body_data)
+            if error_handler is not None:
+                if response.status in error_handler.keys():
+                    raise error_handler[response.status]
+            if result_type == ResultType.STATUS_CODE:
+                return response.status
+            if result_type == ResultType.TEXT:
+                return await response.text()
+            if return_type is not None:
+                data = await response.json()
+                if isinstance(return_type, dict):
+                    return data
+                origin = return_type.__origin__ if hasattr(return_type, '__origin__') else None
+                if origin == list:
+                    c = return_type.__args__[0]
+                    return [x if isinstance(x, c) else c(**x) for x in data['data']]
+                if get_from_data:
+                    d = data['data']
+                    if isinstance(d, list):
+                        if len(d) == 0:
+                            return None
+                        return return_type(**d[0])
+                    else:
+                        return return_type(**d)
                 else:
-                    return return_type(**d)
-            else:
-                return return_type(**data)
+                    return return_type(**data)
 
     async def __generate_app_token(self) -> None:
         if self.app_secret is None:
@@ -602,9 +601,9 @@ class Twitch:
             'grant_type': 'client_credentials',
             'scope': build_scope(self.__app_auth_scope)
         }
-        self.__logger.debug('generating fresh app token')
+        self.logger.debug('generating fresh app token')
         url = build_url(TWITCH_AUTH_BASE_URL + 'oauth2/token', params)
-        async with ClientSession() as session:
+        async with ClientSession(timeout=self.session_timeout) as session:
             result = await session.post(url)
         if result.status != 200:
             raise TwitchAuthorizationException(f'Authentication failed with code {result.status} ({result.text})')
@@ -654,10 +653,18 @@ class Twitch:
         :raises ~twitchAPI.types.InvalidTokenException: if the given token is invalid or for a different client id
         """
         if refresh_token is None and self.auto_refresh_auth:
-            raise ValueError('refresh_token has to be provided when auto_refresh_user_auth is True')
+            raise ValueError('refresh_token has to be provided when auto_refresh_auth is True')
+        if scope is None:
+            raise MissingScopeException('scope was not provided')
         if validate:
-            from .oauth import validate_token
+            from .oauth import validate_token, refresh_access_token
             val_result = await validate_token(token)
+            if val_result.get('status', 200) == 401 and refresh_token is not None:
+                # try to refresh once and revalidate
+                token, refresh_token = await refresh_access_token(refresh_token, self.app_id, self.app_secret)
+                if self.user_auth_refresh_callback is not None:
+                    await self.user_auth_refresh_callback(token, refresh_token)
+                val_result = await validate_token(token)
             if val_result.get('status', 200) == 401:
                 raise InvalidTokenException(val_result.get('message', ''))
             if 'login' not in val_result or 'user_id' not in val_result:
@@ -687,6 +694,19 @@ class Twitch:
 
         :return: current user auth token
         """
+        return self.__user_auth_token
+
+    async def get_refreshed_user_auth_token(self) -> Union[str, None]:
+        """Validates the current set user auth token and returns it
+
+        Will reauth if token is invalid"""
+        if self.__user_auth_token is None:
+            return None
+        from .oauth import validate_token
+        val_result = await validate_token(self.__user_auth_token)
+        if val_result.get('status', 200) != 200:
+            # refresh token
+            await self.refresh_used_token()
         return self.__user_auth_token
 
     def get_used_token(self) -> Union[str, None]:
@@ -1047,58 +1067,6 @@ class Twitch:
         async for y in self._build_generator('GET', 'clips', param, AuthType.EITHER, [], Clip, split_lists=True):
             yield y
 
-    async def get_code_status(self,
-                              code: List[str],
-                              user_id: int) -> AsyncGenerator[StatusCode, None]:
-        """Gets the status of one or more provided Bits codes.\n\n
-
-        Requires App authentication\n
-        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-code-status
-
-        :param code: The code to get the status of. Maximum of 20 entries
-        :param user_id: Represents the numeric Twitch user ID of the account which is going to receive the entitlement associated with the code.
-        :raises ~twitchAPI.types.UnauthorizedException: if app authentication is not set or invalid
-        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid
-                        and a re authentication failed
-        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
-        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
-        :raises ValueError: if length of code is not in range 1 to 20
-        """
-        if len(code) > 20 or len(code) < 1:
-            raise ValueError('only between 1 and 20 codes are allowed')
-        param = {
-            'code': code,
-            'user_id': user_id
-        }
-        async for y in self._build_generator('GET', 'entitlements/codes', param, AuthType.APP, [], StatusCode, split_lists=True):
-            yield y
-
-    async def redeem_code(self,
-                          code: List[str],
-                          user_id: int) -> AsyncGenerator[StatusCode, None]:
-        """Redeems one or more provided Bits codes to the authenticated Twitch user.\n\n
-
-        Requires App authentication\n
-        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#redeem-code
-
-        :param code: The code to redeem to the authenticated user’s account. Maximum of 20 entries
-        :param user_id: Represents the numeric Twitch user ID of the account which  is going to receive the entitlement associated with the code.
-        :raises ~twitchAPI.types.UnauthorizedException: if app authentication is not set or invalid
-        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
-        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid
-                        and a re authentication failed
-        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
-        :raises ValueError: if length of code is not in range 1 to 20
-        """
-        if len(code) > 20 or len(code) < 1:
-            raise ValueError('only between 1 and 20 codes are allowed')
-        param = {
-            'code': code,
-            'user_id': user_id
-        }
-        async for y in self._build_generator('POST', 'entitlements/code', param, AuthType.APP, [], StatusCode, split_lists=True):
-            yield y
-
     async def get_top_games(self,
                             after: Optional[str] = None,
                             before: Optional[str] = None,
@@ -1182,6 +1150,77 @@ class Twitch:
         async for y in self._build_generator('POST', 'moderation/enforcements/status', {'broadcaster_id': broadcaster_id},
                                              AuthType.USER, [AuthScope.MODERATION_READ], AutoModStatus, body_data=body):
             yield y
+
+    async def get_automod_settings(self,
+                                   broadcaster_id: str,
+                                   moderator_id: str) -> AutoModSettings:
+        """Gets the broadcaster’s AutoMod settings.
+
+        Requires User Authentication with :const:`~twitchAPI.types.AuthScope.MODERATOR_READ_AUTOMOD_SETTINGS`\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-automod-settings
+
+        :param broadcaster_id: The ID of the broadcaster whose AutoMod settings you want to get.
+        :param moderator_id: The ID of the broadcaster or a user that has permission to moderate the broadcaster’s chat room.
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
+        """
+        param = {
+            "broadcaster_id": broadcaster_id,
+            "moderator_id": moderator_id
+        }
+        error_handler = {403: TwitchAPIException('Forbidden: The user in moderator_id is not one of the broadcaster\'s moderators.')}
+        return await self._build_result('GET',
+                                        'moderation/automod/settings',
+                                        param,
+                                        AuthType.USER,
+                                        [AuthScope.MODERATOR_READ_AUTOMOD_SETTINGS],
+                                        AutoModSettings,
+                                        error_handler=error_handler)
+
+    async def update_automod_settings(self,
+                                      broadcaster_id: str,
+                                      moderator_id: str,
+                                      settings: Optional[AutoModSettings] = None,
+                                      overall_level: Optional[int] = None) -> AutoModSettings:
+        """Updates the broadcaster’s AutoMod settings.
+
+        You can either set the individual level or the overall level, but not both at the same time.
+        Setting the overall_level parameter in settings will be ignored.
+
+        Requires User Authentication with :const:`~twitchAPI.types.AuthScope.MODERATOR_MANAGE_AUTOMOD_SETTINGS`\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#update-automod-settings
+
+        :param broadcaster_id: The ID of the broadcaster whose AutoMod settings you want to update.
+        :param moderator_id: The ID of the broadcaster or a user that has permission to moderate the broadcaster’s chat room.
+        :param settings: If you want to change individual settings, set this. |default|:code:`None`
+        :param overall_level: If you want to change the overall level, set this. |default|:code:`None`
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
+        :raises ValueError: if both settings and overall_level are given or none of them are given
+        """
+        if (settings is not None and overall_level is not None) or (settings is None and overall_level is None):
+            raise ValueError('You have to specify exactly one of settings or oevrall_level')
+        param = {
+            "broadcaster_id": broadcaster_id,
+            "moderator_id": moderator_id
+        }
+        body = settings.to_dict() if settings is not None else {}
+        body['overall_level'] = overall_level
+        return await self._build_result('PUT',
+                                        'moderation/automod/settings',
+                                        param,
+                                        AuthType.USER,
+                                        [AuthScope.MODERATOR_MANAGE_AUTOMOD_SETTINGS],
+                                        AutoModSettings,
+                                        body_data=remove_none_values(body))
 
     async def get_banned_users(self,
                                broadcaster_id: str,
@@ -1451,7 +1490,8 @@ class Twitch:
                           game_id: Optional[List[str]] = None,
                           language: Optional[List[str]] = None,
                           user_id: Optional[List[str]] = None,
-                          user_login: Optional[List[str]] = None) -> AsyncGenerator[Stream, None]:
+                          user_login: Optional[List[str]] = None,
+                          stream_type: Optional[str] = None) -> AsyncGenerator[Stream, None]:
         """Gets information about active streams. Streams are returned sorted by number of current viewers, in
         descending order. Across multiple pages of results, there may be duplicate or missing streams, as viewers join
         and leave streams.\n\n
@@ -1467,6 +1507,8 @@ class Twitch:
         :param user_id: Returns streams broadcast by one or more specified user IDs. You can specify up to 100 IDs. |default| :code:`None`
         :param user_login: Returns streams broadcast by one or more specified user login names.
                         You can specify up to 100 names. |default| :code:`None`
+        :param stream_type: The type of stream to filter the list of streams by. Possible values are :code:`all` and :code:`live`
+                        |default| :code:`None`
         :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
         :raises ~twitchAPI.types.UnauthorizedException: if app authentication is not set or invalid
         :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
@@ -1491,7 +1533,8 @@ class Twitch:
             'game_id': game_id,
             'language': language,
             'user_id': user_id,
-            'user_login': user_login
+            'user_login': user_login,
+            'type': stream_type
         }
         async for y in self._build_generator('GET', 'streams', param, AuthType.EITHER, [], Stream, split_lists=True):
             yield y
@@ -1541,7 +1584,7 @@ class Twitch:
                                             broadcaster_id: str,
                                             user_ids: Optional[List[str]] = None,
                                             after: Optional[str] = None,
-                                            first: Optional[int] = 20) -> AsyncGenerator[BroadcasterSubscriptions, None]:
+                                            first: Optional[int] = 20) -> BroadcasterSubscriptions:
         """Get all of a broadcaster’s subscriptions.\n\n
 
         Requires User authentication with scope :const:`~twitchAPI.types.AuthScope.CHANNEL_READ_SUBSCRIPTIONS`\n
@@ -1569,9 +1612,8 @@ class Twitch:
             'first': first,
             'after': after
         }
-        async for y in self._build_generator('GET', 'subscriptions', param, AuthType.USER, [AuthScope.CHANNEL_READ_SUBSCRIPTIONS],
-                                             BroadcasterSubscriptions, split_lists=True):
-            yield y
+        return await self._build_iter_result('GET', 'subscriptions', param, AuthType.USER, [AuthScope.CHANNEL_READ_SUBSCRIPTIONS],
+                                             BroadcasterSubscriptions, split_lists=True)
 
     async def check_user_subscription(self,
                                       broadcaster_id: str,
@@ -1596,77 +1638,6 @@ class Twitch:
             'user_id': user_id
         }
         return await self._build_result('GET', 'subscriptions/user', param, AuthType.EITHER, [AuthScope.USER_READ_SUBSCRIPTIONS], UserSubscription)
-
-    async def get_all_stream_tags(self,
-                                  after: Optional[str] = None,
-                                  first: int = 20,
-                                  tag_ids: Optional[List[str]] = None) -> AsyncGenerator[StreamTag, None]:
-        """Gets the list of all stream tags defined by Twitch, optionally filtered by tag ID(s).\n\n
-
-        Requires App authentication\n
-        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-all-stream-tags
-
-        :param after: Cursor for forward pagination |default| :code:`None`
-        :param first: Maximum number of objects to return. Maximum: 100. |default| :code:`20`
-        :param tag_ids: IDs of tags. Maximum 100 entries |default| :code:`None`
-        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
-        :raises ~twitchAPI.types.UnauthorizedException: if app authentication is not set or invalid
-        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
-        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
-        :raises ValueError: if first is not in range 1 to 100 or tag_ids has more than 100 entries
-        """
-        if first < 1 or first > 100:
-            raise ValueError('first must be between 1 and 100')
-        if tag_ids is not None and len(tag_ids) > 100:
-            raise ValueError('tag_ids can not have more than 100 entries')
-        param = {
-            'after': after,
-            'first': first,
-            'tag_id': tag_ids
-        }
-        async for y in self._build_generator('GET', 'tags/streams', param, AuthType.APP, [], StreamTag, split_lists=True):
-            yield y
-
-    async def get_stream_tags(self,
-                              broadcaster_id: str) -> AsyncGenerator[StreamTag, None]:
-        """Gets the list of tags for a specified stream (channel).\n\n
-
-        Requires User authentication\n
-        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-stream-tags
-
-        :param broadcaster_id: ID of the stream that's tags are going to be fetched
-        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
-        :raises ~twitchAPI.types.UnauthorizedException: if app authentication is not set or invalid
-        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
-        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
-        """
-        async for y in self._build_generator('GET', 'streams/tags', {'broadcaster_id': broadcaster_id}, AuthType.USER, [], StreamTag):
-            yield y
-
-    async def replace_stream_tags(self,
-                                  broadcaster_id: str,
-                                  tag_ids: List[str]):
-        """Applies specified tags to a specified stream, overwriting any existing tags applied to that stream.
-        If no tags are specified, all tags previously applied to the stream are removed.
-        Automated tags are not affected by this operation.\n\n
-
-        Requires User authentication with scope :const:`~twitchAPI.types.AuthScope.CHANNEL_MANAGE_BROADCAST`\n
-        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#replace-stream-tags
-
-        :param broadcaster_id: ID of the stream for which tags are to be replaced.
-        :param tag_ids: IDs of tags to be applied to the stream. Maximum of 100 supported.
-        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
-        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
-        :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
-        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid
-                        and a re authentication failed
-        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
-        :raises ValueError: if more than 100 tag_ids where provided
-        """
-        if len(tag_ids) > 100:
-            raise ValueError('tag_ids can not have more than 100 entries')
-        await self._build_result('PUT', 'streams/tags', {'broadcaster_id': broadcaster_id}, AuthType.USER, [AuthScope.CHANNEL_MANAGE_BROADCAST],
-                                 None, body_data={'tag_ids': tag_ids})
 
     async def get_channel_teams(self,
                                 broadcaster_id: str) -> List[ChannelTeam]:
@@ -1753,6 +1724,9 @@ class Twitch:
         """Gets information on follow relationships between two Twitch users.
         Information returned is sorted in order, most recent follow first.\n\n
 
+        .. warning:: This Endpoint will stop working on or soon after the 3rd of August 2023\n
+            Please switch to :const:`~twitchAPI.twitch.Twitch.get_channel_followers()` and :const:`~twitchAPI.twitch.Twitch.get_followed_channels()`.
+
         Requires App authentication.\n
         You have to use at least one of the following fields: from_id, to_id
         For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-users-follows
@@ -1779,6 +1753,76 @@ class Twitch:
         }
         return await self._build_iter_result('GET', 'users/follows', param, AuthType.EITHER, [], TwitchUserFollowResult)
 
+    async def get_channel_followers(self,
+                                    broadcaster_id: str,
+                                    user_id: Optional[str] = None,
+                                    first: Optional[int] = None,
+                                    after: Optional[str] = None) -> ChannelFollowersResult:
+        """ Gets a list of users that follow the specified broadcaster.
+        You can also use this endpoint to see whether a specific user follows the broadcaster.
+
+        Requires User Authentication with :const:`~twitchAPI.types.AuthScope.MODERATOR_READ_FOLLOWERS`\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-channel-followers
+
+        :param broadcaster_id: The broadcaster’s ID. Returns the list of users that follow this broadcaster.
+        :param user_id: A user’s ID. Use this parameter to see whether the user follows this broadcaster.
+            If specified, the response contains this user if they follow the broadcaster.
+            If not specified, the response contains all users that follow the broadcaster. |default|:code:`None`
+        :param first: The maximum number of items to return per page in the response. Minimum 1, Maximum 100 |default| :code:`20`
+        :param after: The cursor used to get the next page of results.
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
+        :raises ValueError: if first is not in range 1 to 100
+        """
+        if first is not None and (first < 1 or first > 100):
+            raise ValueError('first must be in range 1 to 100')
+        param = {
+            'broadcaster_id': broadcaster_id,
+            'user_id': user_id,
+            'first': first,
+            'after': after
+        }
+        return await self._build_iter_result('GET', 'channels/followers', param, AuthType.USER, [AuthScope.MODERATOR_READ_FOLLOWERS],
+                                             ChannelFollowersResult)
+
+    async def get_followed_channels(self,
+                                    user_id: str,
+                                    broadcaster_id: Optional[str] = None,
+                                    first: Optional[int] = None,
+                                    after: Optional[str] = None) -> FollowedChannelsResult:
+        """Gets a list of broadcasters that the specified user follows.
+        You can also use this endpoint to see whether a user follows a specific broadcaster.
+
+        Requires User Authentication with :const:`~twitchAPI.types.AuthScope.USER_READ_FOLLOWS`\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-followed-channels
+
+        :param user_id: A user’s ID. Returns the list of broadcasters that this user follows. This ID must match the user ID in the user OAuth token.
+        :param broadcaster_id: A broadcaster’s ID. Use this parameter to see whether the user follows this broadcaster.
+            If specified, the response contains this broadcaster if the user follows them.
+            If not specified, the response contains all broadcasters that the user follows. |default| :code:`None`
+        :param first: The maximum number of items to return per page in the response. Minimum 1, Maximum 100 |default| :code:`20`
+        :param after: The cursor used to get the next page of results.
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
+        :raises ValueError: if first is not in range 1 to 100
+        """
+        if first is not None and (first < 1 or first > 100):
+            raise ValueError('first must be in range 1 to 100')
+        param = {
+            'user_id': user_id,
+            'broadcaster_id': broadcaster_id,
+            'first': first,
+            'after': after
+        }
+        return await self._build_iter_result('GET', 'channels/followed', param, AuthType.USER, [AuthScope.USER_READ_FOLLOWS], FollowedChannelsResult)
 
     async def update_user(self,
                           description: str) -> TwitchUser:
@@ -1925,7 +1969,8 @@ class Twitch:
                                          game_id: Optional[str] = None,
                                          broadcaster_language: Optional[str] = None,
                                          title: Optional[str] = None,
-                                         delay: Optional[int] = None) -> bool:
+                                         delay: Optional[int] = None,
+                                         tags: Optional[List[str]] = None) -> bool:
         """Modifies channel information for users.\n\n
 
         Requires User authentication with scope :const:`~twitchAPI.types.AuthScope.CHANNEL_MANAGE_BROADCAST`\n
@@ -1936,6 +1981,8 @@ class Twitch:
         :param broadcaster_language: The language of the channel |default| :code:`None`
         :param title: The title of the stream |default| :code:`None`
         :param delay: Stream delay in seconds. Trying to set this while not being a Twitch Partner will fail! |default| :code:`None`
+        :param tags: A list of channel-defined tags to apply to the channel. To remove all tags from the channel, set tags to an empty array.
+                |default|:code:`None`
         :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
         :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
         :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
@@ -1943,15 +1990,19 @@ class Twitch:
         :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
         :raises ValueError: if none of the following fields are specified: `game_id, broadcaster_language, title`
         :raises ValueError: if title is a empty string
+        :raises ValueError: if tags has more than 10 entries
         """
-        if game_id is None and broadcaster_language is None and title is None:
+        if game_id is None and broadcaster_language is None and title is None and tags is None:
             raise ValueError('You need to specify at least one of the optional parameter')
         if title is not None and len(title) == 0:
             raise ValueError('title cant be a empty string')
+        if tags is not None and len(tags) > 10:
+            raise ValueError('tags can only contain up to 10 items')
         body = {k: v for k, v in {'game_id': game_id,
                                   'broadcaster_language': broadcaster_language,
                                   'title': title,
-                                  'delay': delay}.items() if v is not None}
+                                  'delay': delay,
+                                  'tags': tags}.items() if v is not None}
         return await self._build_result('PATCH', 'channels', {'broadcaster_id': broadcaster_id}, AuthType.USER,
                                         [AuthScope.CHANNEL_MANAGE_BROADCAST], None, body_data=body, result_type=ResultType.STATUS_CODE) == 204
 
@@ -2754,9 +2805,8 @@ class Twitch:
         """
         if first is not None and (first < 1 or first > 20):
             raise ValueError('first must be in range 1 to 20')
-        if prediction_ids is not None:
-            if len(prediction_ids) > 100:
-                raise ValueError('maximum of 100 prediction ids allowed')
+        if prediction_ids is not None and len(prediction_ids) > 100:
+            raise ValueError('maximum of 100 prediction ids allowed')
 
         param = {
             'broadcaster_id': broadcaster_id,
@@ -2801,8 +2851,7 @@ class Twitch:
             'outcomes': [{'title': x} for x in outcomes],
             'prediction_window': prediction_window
         }
-        return await self._build_result('POST', 'predictions', {}, AuthType.USER, [AuthScope.CHANNEL_MANAGE_PREDICTIONS], Prediction,
-                                        body_data=body)
+        return await self._build_result('POST', 'predictions', {}, AuthType.USER, [AuthScope.CHANNEL_MANAGE_PREDICTIONS], Prediction, body_data=body)
 
     async def end_prediction(self,
                              broadcaster_id: str,
@@ -2829,9 +2878,8 @@ class Twitch:
         """
         if status not in (PredictionStatus.RESOLVED, PredictionStatus.CANCELED, PredictionStatus.LOCKED):
             raise ValueError('status has to be one of RESOLVED, CANCELED or LOCKED')
-        if status == PredictionStatus.RESOLVED:
-            if winning_outcome_id is None:
-                raise ValueError('need to specify winning_outcome_id for status RESOLVED')
+        if status == PredictionStatus.RESOLVED and winning_outcome_id is None:
+            raise ValueError('need to specify winning_outcome_id for status RESOLVED')
         body = {
             'broadcaster_id': broadcaster_id,
             'id': prediction_id,
@@ -2839,7 +2887,7 @@ class Twitch:
         }
         if winning_outcome_id is not None:
             body['winning_outcome_id'] = winning_outcome_id
-        return await self._build_result('PATH', 'predictions', {}, AuthType.USER, [AuthScope.CHANNEL_MANAGE_PREDICTIONS], Prediction, body_data=body)
+        return await self._build_result('PATCH', 'predictions', {}, AuthType.USER, [AuthScope.CHANNEL_MANAGE_PREDICTIONS], Prediction, body_data=body)
 
     async def start_raid(self,
                          from_broadcaster_id: str,
@@ -3521,6 +3569,39 @@ class Twitch:
         await self._build_result('POST', 'chat/announcements', param, AuthType.USER, [AuthScope.MODERATOR_MANAGE_ANNOUNCEMENTS], None,
                                  body_data=body, error_handler=error)
 
+    async def send_a_shoutout(self,
+                              from_broadcaster_id: str,
+                              to_broadcaster_id: str,
+                              moderator_id: str) -> None:
+        """Sends a Shoutout to the specified broadcaster.\n
+        Typically, you send Shoutouts when you or one of your moderators notice another broadcaster in your chat, the other broadcaster is coming up
+        in conversation, or after they raid your broadcast.
+
+        Requires User Authentication with :const:`~twitchAPI.types.AuthScope.MODERATOR_MANAGE_SHOUTOUTS`\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#send-a-shoutout
+
+        :param from_broadcaster_id: The ID of the broadcaster that’s sending the Shoutout.
+        :param to_broadcaster_id: The ID of the broadcaster that’s receiving the Shoutout.
+        :param moderator_id: The ID of the broadcaster or a user that is one of the broadcaster’s moderators.
+            This ID must match the user ID in the access token.
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
+        :raises ~twitchAPI.types.TwitchAPIException: if the user in moderator_id is not one of the broadcasters moderators or the broadcaster
+            cant send to_broadcaster_id a shoutout
+        """
+        param = {
+            'from_broadcaster_id': from_broadcaster_id,
+            'to_broadcaster_id': to_broadcaster_id,
+            'moderator_id': moderator_id
+        }
+        err = {403: TwitchAPIException(f'Forbidden: the user with ID {moderator_id} is not one of the moderators broadcasters or '
+                                       f'the broadcaster cant send {to_broadcaster_id} a shoutout')}
+        await self._build_result('POST', 'chat/shoutouts', param, AuthType.USER, [AuthScope.MODERATOR_MANAGE_SHOUTOUTS], None, error_handler=err)
+
     async def get_soundtrack_current_track(self, broadcaster_id: str) -> CurrentSoundtrack:
         """Gets the Soundtrack track that the broadcaster is playing.
 
@@ -3558,7 +3639,7 @@ class Twitch:
         :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
         :raises ValueError: if first is not between 1 and 50
         """
-        if first is not None and first < 1 or first > 50:
+        if first is not None and (first < 1 or first > 50):
             raise ValueError('first must be between 1 and 50')
         param = {
             'broadcaster_id': broadcaster_id,
@@ -3587,7 +3668,7 @@ class Twitch:
         :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
         :raises ValueError: if first is not between 1 and 50
         """
-        if first is not None and first < 1 or first > 50:
+        if first is not None and (first < 1 or first > 50):
             raise ValueError('first must be between 1 and 50')
         param = {
             'id': playlist_id,
@@ -3617,12 +3698,11 @@ class Twitch:
         :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
         :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
         :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
-         :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
-         :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
-         :raises ValueError: if first is not between 1 and 1000
-        :return:
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
+        :raises ValueError: if first is not between 1 and 1000
         """
-        if first is not None and first < 1 or first > 1000:
+        if first is not None and (first < 1 or first > 1000):
             raise ValueError('first must be between 1 and 1000')
 
         param = {
@@ -3632,3 +3712,101 @@ class Twitch:
             'after': after
         }
         return await self._build_iter_result('GET', 'chat/chatters', param, AuthType.USER, [AuthScope.MODERATOR_READ_CHATTERS], GetChattersResponse)
+
+    async def get_shield_mode_status(self,
+                                     broadcaster_id: str,
+                                     moderator_id: str) -> ShieldModeStatus:
+        """Gets the broadcaster’s Shield Mode activation status.
+
+        Requires User Authentication with either :const:`~twitchAPI.types.AuthScope.MODERATOR_READ_SHIELD_MODE` or
+        :const:`~twitchAPI.types.AuthScope.MODERATOR_MANAGE_SHIELD_MODE`\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-shield-mode-status
+
+        :param broadcaster_id: The ID of the broadcaster whose Shield Mode activation status you want to get.
+        :param moderator_id: The ID of the broadcaster or a user that is one of the broadcaster’s moderators.
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
+        """
+        param = {
+            'broadcaster_id': broadcaster_id,
+            'moderator_id': moderator_id
+        }
+        return await self._build_result('GET', 'moderation/shield_mode', param, AuthType.USER,
+                                        [[AuthScope.MODERATOR_READ_SHIELD_MODE, AuthScope.MODERATOR_MANAGE_SHIELD_MODE]], ShieldModeStatus)
+
+    async def update_shield_mode_status(self,
+                                        broadcaster_id: str,
+                                        moderator_id: str,
+                                        is_active: bool) -> ShieldModeStatus:
+        """Activates or deactivates the broadcaster’s Shield Mode.
+
+        Requires User Authentication with :const:`~twitchAPI.types.AuthScope.MODERATOR_MANAGE_SHIELD_MODE`\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#update-shield-mode-status
+
+        :param broadcaster_id: The ID of the broadcaster whose Shield Mode you want to activate or deactivate.
+        :param moderator_id: The ID of the broadcaster or a user that is one of the broadcaster’s moderators.
+        :param is_active: A Boolean value that determines whether to activate Shield Mode.
+                Set to true to activate Shield Mode; otherwise, false to deactivate Shield Mode.
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
+        """
+        param = {
+            'broadcaster_id': broadcaster_id,
+            'moderator_id': moderator_id
+        }
+        return await self._build_result('PUT', 'moderation/shield_mode', param, AuthType.USER, [AuthScope.MODERATOR_MANAGE_SHIELD_MODE],
+                                        ShieldModeStatus, body_data={'is_active': is_active})
+
+    async def get_charity_campaign(self,
+                                   broadcaster_id: str) -> Optional[CharityCampaign]:
+        """Gets information about the charity campaign that a broadcaster is running.
+
+        Requires User Authentication with :const:`~twitchAPI.types.AuthScope.CHANNEL_READ_CHARITY`\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-charity-campaign
+
+        :param broadcaster_id: The ID of the broadcaster that’s currently running a charity campaign.
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
+        """
+        return await self._build_result('GET', 'charity/campaigns', {'broadcaster_id': broadcaster_id}, AuthType.USER,
+                                        [AuthScope.CHANNEL_READ_CHARITY], CharityCampaign)
+
+    async def get_charity_donations(self,
+                                    broadcaster_id: str,
+                                    first: Optional[int] = None,
+                                    after: Optional[str] = None) -> AsyncGenerator[CharityCampaignDonation, None]:
+        """Gets the list of donations that users have made to the broadcaster’s active charity campaign.
+
+        Requires User Authentication with :const:`~twitchAPI.types.AuthScope.CHANNEL_READ_CHARITY`\n
+        For detailed documentation, see here: https://dev.twitch.tv/docs/api/reference#get-charity-campaign-donations
+
+        :param broadcaster_id: The ID of the broadcaster that’s currently running a charity campaign.
+        :param first: The maximum number of items to return per page in a single response. Maximum 100 |default|:code:`20`
+        :param after: The cursor used to get the next page of results. |default|:code:`None`
+        :raises ~twitchAPI.types.TwitchAPIException: if the request was malformed
+        :raises ~twitchAPI.types.UnauthorizedException: if user authentication is not set or invalid
+        :raises ~twitchAPI.types.MissingScopeException: if the user authentication is missing the required scope
+        :raises ~twitchAPI.types.TwitchAuthorizationException: if the used authentication token became invalid and a re authentication failed
+        :raises ~twitchAPI.types.TwitchBackendException: if the Twitch API itself runs into problems
+        :raises ~twitchAPI.types.TwitchAPIException: if a Query Parameter is missing or invalid
+        """
+        param = {
+            'broadcaster_id': broadcaster_id,
+            'first': first,
+            'after': after
+        }
+        async for y in self._build_generator('GET', 'charity/donations', param, AuthType.USER, [AuthScope.CHANNEL_READ_CHARITY],
+                                             CharityCampaignDonation):
+            yield y
